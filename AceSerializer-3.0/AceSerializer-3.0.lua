@@ -282,6 +282,9 @@ function AceSerializer:Serialize(...)
     local nres = 1
     local nargs = select("#", ...)
 
+    -- Ensure the first element is always set
+    serializeTbl[1] = serializeTbl[1] or CONTROL_START
+
     -- Estimate the required size based on number of arguments
     -- This helps avoid table resizing during serialization
     if nargs > 1 then
