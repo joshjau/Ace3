@@ -300,6 +300,18 @@ function AceSerializer:Serialize(...)
 
     serializeTbl[nres+1] = CONTROL_END	-- Mark end of serialized data
 
+    -- Ensure there are no nil values in the table before concatenation
+    for i = 1, nres+1 do
+        if serializeTbl[i] == nil then
+            -- If we find a nil, something went wrong - reconstruct the table
+            if i == 1 then
+                serializeTbl[1] = CONTROL_START
+            else
+                serializeTbl[i] = "" -- Replace nil with empty string to avoid concat errors
+            end
+        end
+    end
+
     -- Get the concatenated result
     local result = tconcat(serializeTbl, "", 1, nres+1)
 
