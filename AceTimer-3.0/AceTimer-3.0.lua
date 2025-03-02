@@ -33,11 +33,31 @@ AceTimer.highEndConfig = {
 	initialTimerCapacity = 128,    -- Initial capacity for timer collections
 	optimizeLocalLookups = true,   -- Optimize local function references
 	cleanupInterval = 60,          -- Seconds between cleanup operations
-	lastCleanupTime = GetTime()    -- Last time cleanup was performed
+	nonCriticalDelayFactor = 1.5,  -- Multiply delay for non-critical timers
+	lastCleanupTime = GetTime(),   -- Last time cleanup was performed
+	useBatchProcessing = true,     -- Process timers in batches to reduce per-frame overhead
+	batchInterval = 0.01,          -- How frequently to process timer batches (seconds)
+	maxBatchSize = 20,             -- Maximum number of timers to process in a single batch
+	usePriorityQueue = true,       -- Use a priority queue to optimize timer sorting
+	validateMethodsBeforeCall = true, -- Validate method existence before calling
+	autoSkipMissingMethods = true, -- Skip execution of missing methods instead of generating errors
+	verboseErrors = false,         -- Show detailed error messages with stack traces
+	errorThrottling = true,        -- Prevent excessive error spam from the same timer
+	maxErrorsPerMethod = 3         -- Maximum number of errors to show for each method before throttling
 }
 
 AceTimer.activeTimers = AceTimer.activeTimers or {} -- Active timer list
 local activeTimers = AceTimer.activeTimers -- Upvalue our private data
+local activeTimerCount = 0 -- Direct counter to avoid frequent table iteration
+
+-- Registry for named timers to prevent redundant timer creation
+-- Format: { [object] = { [timerName] = timerHandle } }
+AceTimer.namedTimers = AceTimer.namedTimers or {}
+local namedTimers = AceTimer.namedTimers
+
+-- Priority queue for efficient timer sorting
+AceTimer.timerHeap = AceTimer.timerHeap or {}
+local timerHeap = AceTimer.timerHeap
 
 -- String pool for common strings to reduce memory allocation
 local stringPool = {}
@@ -63,6 +83,7 @@ local GetTime, C_TimerAfter = GetTime, C_Timer.After
 local ERROR_NO_FUNC_DELAY = getPooledString(MAJOR..": ScheduleTimer(callback, delay, args...): 'callback' and 'delay' must have set values.")
 local ERROR_SELF_NOT_TABLE = getPooledString(MAJOR..": ScheduleTimer(callback, delay, args...): 'self' - must be a table.")
 local ERROR_FUNC_NOT_IN_MODULE = getPooledString(MAJOR..": ScheduleTimer(callback, delay, args...): Tried to register '%s' as the callback, but it doesn't exist in the module.")
+local ERROR_NAMED_TIMER_NAME = getPooledString(MAJOR..": ScheduleNamedTimer(name, callback, delay, args...): 'name' must be a string.")
 
 -- Pre-allocated timer objects pool to reduce GC pressure
 local timerPool = {}
@@ -93,8 +114,15 @@ local function recycleTimerObject(timer)
         end
     end
 
-    -- Clear the timer object for reuse
-    for k in pairs(timer) do
+    -- Clear the timer object for reuse - more thorough cleanup
+    for k, v in pairs(timer) do
+        -- Handle nested tables by emptying them first
+        if type(v) == "table" then
+            -- Only clear tables that are not shared/referenced elsewhere
+            if v ~= activeTimers and v ~= namedTimers and v ~= timerHeap then
+                wipe(v)
+            end
+        end
         timer[k] = nil
     end
 
@@ -111,124 +139,104 @@ if AceTimer.highEndConfig.preAllocTimerPool then
     end
 end
 
--- Forward declaration for cleanup function
+-- Forward declarations for cleanup and batch processing
 local performCleanup
-
--- Direct reference to callback creation for faster execution
+local processBatchedTimers
 local createTimerCallback
 
-local function new(self, loop, func, delay, ...)
-	if delay < MIN_TIMER_DELAY then
-		delay = MIN_TIMER_DELAY -- Restrict to the lowest time that the C_Timer API allows us
-	end
+-- At the top with other forward declarations
+local heapInsert, heapExtract, heapifyUp, heapifyDown, heapUpdate
 
-	-- Validate required parameters
-	if not func then
-		error("AceTimer: Attempt to schedule timer with nil function", 2)
-		return
-	end
+-- Forward declare new function
+local new
 
-	local timer = getTimerObject()
-	local time = GetTime()
-	local endTime = time + delay
+-- Track error occurrences to prevent spam
+local errorCounts = {}
 
-	timer.object = self
-	timer.func = func
-	timer.looping = loop
-	timer.argsCount = select("#", ...)
-	timer.delay = delay
-	timer.ends = endTime
-    timer.cancelled = false
+-- Cache for TimeLeft function to avoid repeated GetTime() calls
+local timeLeftCache = { time = 0, values = {} }
 
-	-- Copy varargs into the timer object
-	for i = 1, timer.argsCount do
-		timer[i] = select(i, ...)
-	end
+-- Fast per-object timer cancelation cache
+local cancelCache = {}
 
-	activeTimers[timer] = timer
-
-	-- Create new timer closure to wrap the "timer" object
-	timer.callback = createTimerCallback(timer)
-
-	C_TimerAfter(delay, timer.callback)
-	return timer
+-- Reset error tracking periodically
+local function resetErrorTracking()
+    wipe(errorCounts)
 end
 
--- Optimized timer callback creation
-createTimerCallback = function(timer)
-    return function()
-        if timer.cancelled then return end
+-- Function to clean up resources and manage memory usage
+performCleanup = function()
+    local currentTime = GetTime()
+    if currentTime - AceTimer.highEndConfig.lastCleanupTime < AceTimer.highEndConfig.cleanupInterval then
+        return
+    end
 
-        -- Safety check - ensure timer is valid and has required fields
-        if not timer or not timer.func then
-            -- If timer exists in activeTimers but is invalid, remove it
-            for handle, t in pairs(activeTimers) do
-                if t == timer then
-                    activeTimers[handle] = nil
-                    break
-                end
-            end
-            return
-        end
+    -- Set last cleanup time
+    AceTimer.highEndConfig.lastCleanupTime = currentTime
 
-        -- Fast path for function callbacks (most common case)
-        if type(timer.func) ~= "string" then
-            timer.func(unpack(timer, 1, timer.argsCount or 0))
-        else
-            -- String method call path - ensure object exists
-            if timer.object and timer.object[timer.func] then
-                timer.object[timer.func](timer.object, unpack(timer, 1, timer.argsCount or 0))
-            else
-                -- Log error but don't crash
-                local objType = type(timer.object)
-                local funcName = tostring(timer.func)
-                error(format("AceTimer: method %s not found on object of type %s", funcName, objType), 2)
-            end
-        end
-
-        if timer.looping and not timer.cancelled then
-            -- Optimize time getting for looping timers
-            local time = GetTime()
-            -- Fast path for common case where delay hasn't drifted much
-            local ndelay = timer.delay - (time - timer.ends)
-            -- Ensure the delay doesn't go below the threshold with a single comparison
-            if ndelay < MIN_TIMER_DELAY then ndelay = MIN_TIMER_DELAY end
-
-            C_TimerAfter(ndelay, timer.callback)
-            timer.ends = time + ndelay
-
-            -- Occasionally perform cleanup operations on recurring timers
-            performCleanup()
-        else
-            -- Remove from active timers and recycle the object
-            local handle = timer.handle or timer
-            activeTimers[handle] = nil
-            recycleTimerObject(timer)
+    -- Trim timer pool if it's gotten too large
+    if timerPoolSize > AceTimer.highEndConfig.initialTimerCapacity * 2 then
+        local excessTimers = timerPoolSize - AceTimer.highEndConfig.initialTimerCapacity
+        for i = 1, excessTimers do
+            timerPool[timerPoolSize] = nil
+            timerPoolSize = timerPoolSize - 1
         end
     end
+
+    -- Clean up the time left cache - use wipe consistently
+    wipe(timeLeftCache.values)
+
+    -- Clean up per-object timer cancelation caches for objects no longer in use
+    for obj in pairs(cancelCache) do
+        local stillExists = false
+        for _, timer in pairs(activeTimers) do
+            if timer.object == obj then
+                stillExists = true
+                break
+            end
+        end
+
+        if not stillExists then
+            cancelCache[obj] = nil
+        end
+    end
+
+    -- Clean up empty named timer entries
+    for obj in pairs(namedTimers) do
+        if not next(namedTimers[obj]) then
+            namedTimers[obj] = nil
+        end
+    end
+
+    -- Clean up and validate the priority queue if enabled
+    if AceTimer.highEndConfig.usePriorityQueue then
+        -- Remove any cancelled timers from the heap
+        for i = #timerHeap, 1, -1 do
+            if timerHeap[i].cancelled or not activeTimers[timerHeap[i]] then
+                tremove(timerHeap, i)
+            end
+        end
+
+        -- Re-heapify to ensure proper order
+        heapUpdate(timerHeap)
+    end
+
+    -- Reset error tracking to prevent memory growth
+    resetErrorTracking()
 end
 
--- Performance statistics for monitoring
-AceTimer.stats = {
-    activeTimerCount = 0,
-    pooledTimerCount = 0,
-    totalTimersCreated = 0,
-    totalTimersCancelled = 0,
-    peakActiveTimers = 0
-}
+-- Batch processing timer
+local batchProcessingTimer = nil
+local isBatchProcessing = false
 
 -- Update performance statistics
 local function updateStats()
-    local count = 0
-    for _ in pairs(activeTimers) do
-        count = count + 1
-    end
-    AceTimer.stats.activeTimerCount = count
+    AceTimer.stats.activeTimerCount = activeTimerCount
     AceTimer.stats.pooledTimerCount = timerPoolSize
 
     -- Track peak usage
-    if count > AceTimer.stats.peakActiveTimers then
-        AceTimer.stats.peakActiveTimers = count
+    if activeTimerCount > AceTimer.stats.peakActiveTimers then
+        AceTimer.stats.peakActiveTimers = activeTimerCount
     end
 end
 
@@ -259,7 +267,7 @@ function AceTimer:ScheduleTimer(func, delay, ...)
 		end
 	end
 
-	local timer = new(self, nil, func, delay, ...)
+	local timer = new(self, nil, func, delay, nil, ...)
 
 	-- Update statistics
 	AceTimer.stats.totalTimersCreated = AceTimer.stats.totalTimersCreated + 1
@@ -301,7 +309,7 @@ function AceTimer:ScheduleRepeatingTimer(func, delay, ...)
 		end
 	end
 
-	local timer = new(self, true, func, delay, ...)
+	local timer = new(self, true, func, delay, nil, ...)
 
 	-- Update statistics
 	AceTimer.stats.totalTimersCreated = AceTimer.stats.totalTimersCreated + 1
@@ -310,8 +318,217 @@ function AceTimer:ScheduleRepeatingTimer(func, delay, ...)
 	return timer
 end
 
--- Fast per-object timer cancelation cache
-local cancelCache = {}
+--- Schedule a new one-shot non-critical timer.
+-- This timer multiplies the delay by a configurable factor for tasks that don't need precise timing.
+-- Useful for cosmetic updates, background tasks, or any timer where exact precision isn't critical.
+-- @param func Callback function for the timer pulse (funcref or method name).
+-- @param delay Base delay for the timer, in seconds (will be multiplied by nonCriticalDelayFactor).
+-- @param ... An optional, unlimited amount of arguments to pass to the callback function.
+function AceTimer:ScheduleNonCriticalTimer(func, delay, ...)
+	if not func or not delay then
+		error(ERROR_NO_FUNC_DELAY, 2)
+	end
+	if type(func) == "string" then
+		if type(self) ~= "table" then
+			error(ERROR_SELF_NOT_TABLE, 2)
+		elseif not self[func] then
+			error(ERROR_FUNC_NOT_IN_MODULE:format(func), 2)
+		end
+	end
+
+	local timer = new(self, nil, func, delay, { nonCritical = true }, ...)
+
+	-- Update statistics
+	AceTimer.stats.totalTimersCreated = AceTimer.stats.totalTimersCreated + 1
+	updateStats()
+
+	return timer
+end
+
+--- Schedule a named timer that prevents duplicate timers with the same name from being created.
+-- If a timer with the same name already exists for this object, the existing timer is returned.
+-- This is useful for preventing redundant timer creation, which is a common performance issue.
+-- @param name A string identifier for the timer.
+-- @param func Callback function for the timer pulse (funcref or method name).
+-- @param delay Delay for the timer, in seconds.
+-- @param ... An optional, unlimited amount of arguments to pass to the callback function.
+-- @return The timer handle of either the existing timer or the newly created one.
+-- @usage
+-- -- This will only create one timer even if called multiple times
+-- self:ScheduleNamedTimer("UpdateUI", "UpdateFunc", 0.1)
+-- self:ScheduleNamedTimer("UpdateUI", "UpdateFunc", 0.1) -- Reuses existing timer
+function AceTimer:ScheduleNamedTimer(name, func, delay, ...)
+    if type(name) ~= "string" then
+        error(ERROR_NAMED_TIMER_NAME, 2)
+    end
+
+    if not func or not delay then
+		error(ERROR_NO_FUNC_DELAY, 2)
+	end
+
+	if type(func) == "string" then
+		if type(self) ~= "table" then
+			error(ERROR_SELF_NOT_TABLE, 2)
+		elseif not self[func] then
+			error(ERROR_FUNC_NOT_IN_MODULE:format(func), 2)
+		end
+	end
+
+    -- Check if a timer with this name already exists
+    if namedTimers[self] and namedTimers[self][name] then
+        local existingTimer = namedTimers[self][name]
+
+        -- Check if the timer is still active
+        if activeTimers[existingTimer] and not existingTimer.cancelled then
+            -- Reuse the existing timer
+            AceTimer.stats.namedTimerReused = AceTimer.stats.namedTimerReused + 1
+            return existingTimer
+        end
+    end
+
+    -- Create a new timer
+    local timer = new(self, nil, func, delay, { name = name }, ...)
+
+    -- Register the timer in the named timers registry
+    if not namedTimers[self] then
+        namedTimers[self] = {}
+    end
+    namedTimers[self][name] = timer
+
+    -- Update statistics
+    AceTimer.stats.totalTimersCreated = AceTimer.stats.totalTimersCreated + 1
+    updateStats()
+
+    return timer
+end
+
+--- Schedule a repeating named timer that prevents duplicate timers with the same name.
+-- If a timer with the same name already exists for this object, the existing timer is returned.
+-- @param name A string identifier for the timer.
+-- @param func Callback function for the timer pulse (funcref or method name).
+-- @param delay Delay for the timer, in seconds.
+-- @param ... An optional, unlimited amount of arguments to pass to the callback function.
+-- @return The timer handle of either the existing timer or the newly created one.
+function AceTimer:ScheduleRepeatingNamedTimer(name, func, delay, ...)
+    if type(name) ~= "string" then
+        error(ERROR_NAMED_TIMER_NAME, 2)
+    end
+
+    if not func or not delay then
+		error(ERROR_NO_FUNC_DELAY, 2)
+	end
+
+	if type(func) == "string" then
+		if type(self) ~= "table" then
+			error(ERROR_SELF_NOT_TABLE, 2)
+		elseif not self[func] then
+			error(ERROR_FUNC_NOT_IN_MODULE:format(func), 2)
+		end
+	end
+
+    -- Check if a timer with this name already exists
+    if namedTimers[self] and namedTimers[self][name] then
+        local existingTimer = namedTimers[self][name]
+
+        -- Check if the timer is still active
+        if activeTimers[existingTimer] and not existingTimer.cancelled then
+            -- Reuse the existing timer
+            AceTimer.stats.namedTimerReused = AceTimer.stats.namedTimerReused + 1
+            return existingTimer
+        end
+    end
+
+    -- Create a new timer
+    local timer = new(self, true, func, delay, { name = name }, ...)
+
+    -- Register the timer in the named timers registry
+    if not namedTimers[self] then
+        namedTimers[self] = {}
+    end
+    namedTimers[self][name] = timer
+
+    -- Update statistics
+    AceTimer.stats.totalTimersCreated = AceTimer.stats.totalTimersCreated + 1
+    updateStats()
+
+    return timer
+end
+
+--- Schedule a non-critical named timer that prevents duplicate timers with the same name.
+-- If a timer with the same name already exists for this object, the existing timer is returned.
+-- Non-critical timers apply the nonCriticalDelayFactor to the delay for less frequent updates.
+-- @param name A string identifier for the timer.
+-- @param func Callback function for the timer pulse (funcref or method name).
+-- @param delay Base delay for the timer, in seconds (will be multiplied by nonCriticalDelayFactor).
+-- @param ... An optional, unlimited amount of arguments to pass to the callback function.
+-- @return The timer handle of either the existing timer or the newly created one.
+function AceTimer:ScheduleNonCriticalNamedTimer(name, func, delay, ...)
+    if type(name) ~= "string" then
+        error(ERROR_NAMED_TIMER_NAME, 2)
+    end
+
+    if not func or not delay then
+		error(ERROR_NO_FUNC_DELAY, 2)
+	end
+
+	if type(func) == "string" then
+		if type(self) ~= "table" then
+			error(ERROR_SELF_NOT_TABLE, 2)
+		elseif not self[func] then
+			error(ERROR_FUNC_NOT_IN_MODULE:format(func), 2)
+		end
+	end
+
+    -- Check if a timer with this name already exists
+    if namedTimers[self] and namedTimers[self][name] then
+        local existingTimer = namedTimers[self][name]
+
+        -- Check if the timer is still active
+        if activeTimers[existingTimer] and not existingTimer.cancelled then
+            -- Reuse the existing timer
+            AceTimer.stats.namedTimerReused = AceTimer.stats.namedTimerReused + 1
+            return existingTimer
+        end
+    end
+
+    -- Create a new timer
+    local timer = new(self, nil, func, delay, { name = name, nonCritical = true }, ...)
+
+    -- Register the timer in the named timers registry
+    if not namedTimers[self] then
+        namedTimers[self] = {}
+    end
+    namedTimers[self][name] = timer
+
+    -- Update statistics
+    AceTimer.stats.totalTimersCreated = AceTimer.stats.totalTimersCreated + 1
+    updateStats()
+
+    return timer
+end
+
+--- Cancel a named timer by its name.
+-- @param name The name of the timer to cancel.
+-- @return True if a timer was found and canceled, false otherwise.
+function AceTimer:CancelNamedTimer(name)
+    if not namedTimers[self] or not namedTimers[self][name] then
+        return false
+    end
+
+    local timer = namedTimers[self][name]
+    local result = self:CancelTimer(timer)
+
+    if result then
+        namedTimers[self][name] = nil
+
+        -- Clean up empty tables
+        if not next(namedTimers[self]) then
+            namedTimers[self] = nil
+        end
+    end
+
+    return result
+end
 
 --- Cancels a timer with the given id, registered by the same addon object as used for `:ScheduleTimer`
 -- Both one-shot and repeating timers can be canceled with this function, as long as the `id` is valid
@@ -333,6 +550,29 @@ function AceTimer:CancelTimer(id)
 
 		-- Remove from activeTimers
 		activeTimers[id] = nil
+		activeTimerCount = activeTimerCount - 1
+
+        -- Remove from named timers if this is a named timer
+        if timer.name and timer.object then
+            if namedTimers[timer.object] then
+                namedTimers[timer.object][timer.name] = nil
+                -- Clean up the object entry if there are no more named timers
+                if not next(namedTimers[timer.object]) then
+                    namedTimers[timer.object] = nil
+                end
+            end
+        end
+
+        -- Remove from priority queue if applicable
+        if AceTimer.highEndConfig.usePriorityQueue then
+            for i = 1, #timerHeap do
+                if timerHeap[i] == timer then
+                    tremove(timerHeap, i)
+                    heapUpdate(timerHeap)
+                    break
+                end
+            end
+        end
 
 		-- Recycle the timer object if possible
 		recycleTimerObject(timer)
@@ -385,15 +625,15 @@ function AceTimer:CancelAllTimers()
 		AceTimer.CancelTimer(self, objTimers[i])
 	end
 
+	-- Clear named timers for this object
+	namedTimers[self] = nil
+
 	-- Force cleanup after canceling multiple timers
 	performCleanup()
 
 	-- Update statistics
 	updateStats()
 end
-
--- Cache for TimeLeft function to avoid repeated GetTime() calls
-local timeLeftCache = { time = 0, values = {} }
 
 --- Returns the time left for a timer with the given id, registered by the current addon object ('self').
 -- This function will return 0 when the id is invalid.
@@ -429,41 +669,77 @@ function AceTimer:TimeLeft(id)
 	end
 end
 
--- Function to clean up resources and manage memory usage
-performCleanup = function()
-    local currentTime = GetTime()
-    if currentTime - AceTimer.highEndConfig.lastCleanupTime < AceTimer.highEndConfig.cleanupInterval then
-        return
+--- Returns the time left for a named timer.
+-- This function will return 0 when the timer name is invalid or the timer doesn't exist.
+-- @param name The name of the timer, as used in ScheduleNamedTimer.
+-- @return The time left on the timer.
+function AceTimer:TimeLeftNamed(name)
+    if not namedTimers[self] or not namedTimers[self][name] then
+        return 0
     end
 
-    -- Set last cleanup time
-    AceTimer.highEndConfig.lastCleanupTime = currentTime
+    return self:TimeLeft(namedTimers[self][name])
+end
 
-    -- Trim timer pool if it's gotten too large
-    if timerPoolSize > AceTimer.highEndConfig.initialTimerCapacity * 2 then
-        local excessTimers = timerPoolSize - AceTimer.highEndConfig.initialTimerCapacity
-        for i = 1, excessTimers do
-            timerPool[timerPoolSize] = nil
-            timerPoolSize = timerPoolSize - 1
-        end
+--- Check if a method exists before scheduling a timer for it
+-- This is a helper function to validate that a method exists before scheduling a timer
+-- @param methodName The name of the method to check
+-- @return True if the method exists and is callable, false otherwise
+function AceTimer:MethodExists(methodName)
+    if type(self) ~= "table" or type(methodName) ~= "string" then
+        return false
+    end
+    return type(self[methodName]) == "function"
+end
+
+--- Schedule a timer with automatic method existence validation
+-- This is a safer version of ScheduleTimer that checks if the method exists first
+-- @param func Callback function for the timer pulse (funcref or method name)
+-- @param delay Delay for the timer, in seconds
+-- @param ... An optional, unlimited amount of arguments to pass to the callback function
+-- @return Timer handle if scheduled successfully, nil if the method doesn't exist
+function AceTimer:ScheduleSafeTimer(func, delay, ...)
+    if not func or not delay then
+		error(ERROR_NO_FUNC_DELAY, 2)
+	end
+
+	if type(func) == "string" then
+		if type(self) ~= "table" then
+			error(ERROR_SELF_NOT_TABLE, 2)
+		end
+
+		-- Check if the method exists before scheduling
+		if not self[func] or type(self[func]) ~= "function" then
+		    -- Method doesn't exist, return nil instead of scheduling
+		    return nil
+		end
+	end
+
+	-- Method exists, schedule normally
+	return self:ScheduleTimer(func, delay, ...)
+end
+
+--- Reset error tracking manually
+-- This function can be called to clear the error counters if needed
+function AceTimer:ResetErrorTracking()
+    resetErrorTracking()
+end
+
+--- Configure error handling behavior
+-- @param verbose Whether to show detailed error messages with stack traces
+-- @param throttle Whether to limit the number of error messages for the same method
+-- @param autoSkip Whether to automatically skip execution of missing methods
+function AceTimer:ConfigureErrorHandling(verbose, throttle, autoSkip)
+    if verbose ~= nil then
+        AceTimer.highEndConfig.verboseErrors = verbose
     end
 
-    -- Clean up the time left cache
-    wipe(timeLeftCache.values)
+    if throttle ~= nil then
+        AceTimer.highEndConfig.errorThrottling = throttle
+    end
 
-    -- Clean up per-object timer cancelation caches for objects no longer in use
-    for obj in pairs(cancelCache) do
-        local stillExists = false
-        for _, timer in pairs(activeTimers) do
-            if timer.object == obj then
-                stillExists = true
-                break
-            end
-        end
-
-        if not stillExists then
-            cancelCache[obj] = nil
-        end
+    if autoSkip ~= nil then
+        AceTimer.highEndConfig.autoSkipMissingMethods = autoSkip
     end
 end
 
@@ -548,16 +824,23 @@ AceTimer.embeds = AceTimer.embeds or {}
 local embedFuncs = {
     ScheduleTimer = AceTimer.ScheduleTimer,
     ScheduleRepeatingTimer = AceTimer.ScheduleRepeatingTimer,
+    ScheduleNonCriticalTimer = AceTimer.ScheduleNonCriticalTimer,
+    ScheduleNamedTimer = AceTimer.ScheduleNamedTimer,
+    ScheduleRepeatingNamedTimer = AceTimer.ScheduleRepeatingNamedTimer,
+    ScheduleNonCriticalNamedTimer = AceTimer.ScheduleNonCriticalNamedTimer,
     CancelTimer = AceTimer.CancelTimer,
+    CancelNamedTimer = AceTimer.CancelNamedTimer,
     CancelAllTimers = AceTimer.CancelAllTimers,
-    TimeLeft = AceTimer.TimeLeft
+    TimeLeft = AceTimer.TimeLeft,
+    TimeLeftNamed = AceTimer.TimeLeftNamed
 }
 
 -- Pre-allocate array of function names for consistent usage
 local mixins = {
-	"ScheduleTimer", "ScheduleRepeatingTimer",
-	"CancelTimer", "CancelAllTimers",
-	"TimeLeft"
+	"ScheduleTimer", "ScheduleRepeatingTimer", "ScheduleNonCriticalTimer",
+	"ScheduleNamedTimer", "ScheduleRepeatingNamedTimer", "ScheduleNonCriticalNamedTimer",
+	"CancelTimer", "CancelNamedTimer", "CancelAllTimers",
+	"TimeLeft", "TimeLeftNamed"
 }
 
 function AceTimer:Embed(target)
@@ -629,7 +912,17 @@ function AceTimer:ResetHighEndConfig()
         initialTimerCapacity = 128,    -- Initial capacity for timer collections
         optimizeLocalLookups = true,   -- Optimize local function references
         cleanupInterval = 60,          -- Seconds between cleanup operations
-        lastCleanupTime = GetTime()    -- Last time cleanup was performed
+        nonCriticalDelayFactor = 1.5,  -- Multiply delay for non-critical timers
+        lastCleanupTime = GetTime(),   -- Last time cleanup was performed
+        useBatchProcessing = true,     -- Process timers in batches to reduce per-frame overhead
+        batchInterval = 0.01,          -- How frequently to process timer batches (seconds)
+        maxBatchSize = 20,             -- Maximum number of timers to process in a single batch
+        usePriorityQueue = true,       -- Use a priority queue to optimize timer sorting
+        validateMethodsBeforeCall = true, -- Validate method existence before calling
+        autoSkipMissingMethods = true, -- Skip execution of missing methods instead of generating errors
+        verboseErrors = false,         -- Show detailed error messages with stack traces
+        errorThrottling = true,        -- Prevent excessive error spam from the same timer
+        maxErrorsPerMethod = 3         -- Maximum number of errors to show for each method before throttling
     }
 
     -- Re-initialize timer pool
@@ -642,6 +935,21 @@ function AceTimer:ResetHighEndConfig()
             timerPool[timerPoolSize] = {}
         end
     end
+
+    -- Reset batch processing
+    self:ResetBatchProcessing()
+
+    -- Reset priority queue
+    wipe(timerHeap)
+
+    -- Refill priority queue from active timers if enabled
+    if AceTimer.highEndConfig.usePriorityQueue then
+        for _, timer in pairs(activeTimers) do
+            if not timer.cancelled then
+                heapInsert(timerHeap, timer)
+            end
+        end
+    end
 end
 
 --- Get the current performance statistics
@@ -649,4 +957,98 @@ end
 function AceTimer:GetPerformanceStats()
     updateStats() -- Update stats before returning
     return AceTimer.stats
+end
+
+-- Reset the batch processing configuration
+function AceTimer:ResetBatchProcessing()
+    -- Stop the current batch processor if it exists
+    if batchProcessingTimer then
+        batchProcessingTimer:Cancel()
+        batchProcessingTimer = nil
+        isBatchProcessing = false
+    end
+
+    -- Restart if it should be enabled
+    if AceTimer.highEndConfig.useBatchProcessing and activeTimerCount > 0 then
+        batchProcessingTimer = C_Timer.NewTicker(AceTimer.highEndConfig.batchInterval, processBatchedTimers)
+        isBatchProcessing = true
+    end
+end
+
+-- Configure priority queue settings
+function AceTimer:SetPriorityQueueEnabled(enabled)
+    AceTimer.highEndConfig.usePriorityQueue = (enabled == true)
+
+    -- Reset the priority queue
+    wipe(timerHeap)
+
+    -- Refill queue if enabled
+    if AceTimer.highEndConfig.usePriorityQueue then
+        for _, timer in pairs(activeTimers) do
+            if not timer.cancelled then
+                heapInsert(timerHeap, timer)
+            end
+        end
+    end
+end
+
+-- Redefine processBatchedTimers with consistent function style
+processBatchedTimers = function()
+	-- If no active timers, stop the batch processor
+	if activeTimerCount == 0 then
+		if batchProcessingTimer then
+			batchProcessingTimer:Cancel()
+			batchProcessingTimer = nil
+			isBatchProcessing = false
+		end
+		return
+	end
+
+	local currentTime = GetTime()
+	local processed = 0
+	local maxToProcess = AceTimer.highEndConfig.maxBatchSize
+
+	-- Process ready timers up to the batch size limit
+	if AceTimer.highEndConfig.usePriorityQueue then
+	    -- Use the priority queue for efficient timer processing
+	    while processed < maxToProcess and #timerHeap > 0 do
+	        -- Peek at the top timer without removing it
+	        local timer = timerHeap[1]
+
+	        -- If the timer isn't ready yet, break from the loop
+	        if timer.ends > currentTime or timer.cancelled then
+	            break
+	        end
+
+	        -- Extract the timer
+	        heapExtract(timerHeap)
+
+	        -- Process the timer
+	        if not timer.cancelled then
+	            timer.callback()
+	        end
+
+	        processed = processed + 1
+	    end
+	else
+    	-- Standard approach - loop through all timers
+    	for handle, timer in pairs(activeTimers) do
+    		if timer.ends <= currentTime and not timer.cancelled then
+    			timer.callback()
+    			processed = processed + 1
+
+    			-- Don't process too many timers in one batch to avoid frame lag
+    			if processed >= maxToProcess then
+    				break
+    			end
+    		end
+    	end
+	end
+
+	-- Update the performance statistics
+	AceTimer.stats.batchesProcessed = AceTimer.stats.batchesProcessed + 1
+	AceTimer.stats.timersProcessedInBatch = AceTimer.stats.timersProcessedInBatch + processed
+
+	-- Occasionally perform cleanup operations
+	performCleanup()
 end
