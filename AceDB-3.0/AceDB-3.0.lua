@@ -451,19 +451,22 @@ local function logoutHandler(frame, event)
 
 				-- cleanup sections that are empty without defaults
 				local sv = rawget(db, "sv")
-				for section in pairs(db.keys) do
-					if rawget(sv, section) then
-						-- global is special, all other sections have sub-entrys
-						-- also don't delete empty profiles on main dbs, only on namespaces
-						if section ~= "global" and (section ~= "profiles" or rawget(db, "parent")) then
-							for key in pairs(sv[section]) do
-								if type(sv[section][key]) == "table" and not next(sv[section][key]) then
-									sv[section][key] = nil
+				-- Ensure db.keys is a table before trying to iterate through it
+				if sv and db.keys and type(db.keys) == "table" then
+					for section in pairs(db.keys) do
+						if rawget(sv, section) then
+							-- global is special, all other sections have sub-entrys
+							-- also don't delete empty profiles on main dbs, only on namespaces
+							if section ~= "global" and (section ~= "profiles" or rawget(db, "parent")) then
+								for key in pairs(sv[section]) do
+									if type(sv[section][key]) == "table" and not next(sv[section][key]) then
+										sv[section][key] = nil
+									end
 								end
 							end
-						end
-						if not next(sv[section]) then
-							sv[section] = nil
+							if not next(sv[section]) then
+								sv[section] = nil
+							end
 						end
 					end
 				end
@@ -476,19 +479,22 @@ local function logoutHandler(frame, event)
 
 				-- cleanup sections that are empty without defaults
 				local sv = rawget(db, "sv")
-				for section in pairs(db.keys) do
-					if rawget(sv, section) then
-						-- global is special, all other sections have sub-entrys
-						-- also don't delete empty profiles on main dbs, only on namespaces
-						if section ~= "global" and (section ~= "profiles" or rawget(db, "parent")) then
-							for key in pairs(sv[section]) do
-								if type(sv[section][key]) == "table" and not next(sv[section][key]) then
-									sv[section][key] = nil
+				-- Ensure db.keys is a table before trying to iterate through it
+				if sv and db.keys and type(db.keys) == "table" then
+					for section in pairs(db.keys) do
+						if rawget(sv, section) then
+							-- global is special, all other sections have sub-entrys
+							-- also don't delete empty profiles on main dbs, only on namespaces
+							if section ~= "global" and (section ~= "profiles" or rawget(db, "parent")) then
+								for key in pairs(sv[section]) do
+									if type(sv[section][key]) == "table" and not next(sv[section][key]) then
+										sv[section][key] = nil
+									end
 								end
 							end
-						end
-						if not next(sv[section]) then
-							sv[section] = nil
+							if not next(sv[section]) then
+								sv[section] = nil
+							end
 						end
 					end
 				end
