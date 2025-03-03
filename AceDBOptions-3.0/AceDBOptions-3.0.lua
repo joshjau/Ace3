@@ -387,7 +387,7 @@ end
 
 --[[ create and return a handler object for the db, or upgrade it if it already existed ]]
 local function getOptionsHandler(db, noDefaultProfiles)
-	if type(db) ~= "table" or not db.keys or not db.sv or not db.defaults or not db.parent then
+	if type(db) ~= "table" or not db.keys or not db.sv or not db.defaults then
 		error("Usage: GetOptionsTable(database): 'database' must be an AceDB-3.0 database object", 2)
 	end
 

@@ -179,7 +179,7 @@ local function iterateargs(tab)
 				end
 			end
 		end
-	end
+	end, nil
 end
 
 local function checkhidden(info, inputpos, tab)
