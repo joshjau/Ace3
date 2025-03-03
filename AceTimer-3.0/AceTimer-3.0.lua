@@ -67,6 +67,7 @@ local timerMT = {__index = timerPrototype}
 
 -- Fast path for timer creation
 local function new(self, loop, func, delay, ...)
+	-- Enforce minimum delay
 	if delay < MIN_TIMER_DELAY then
 		delay = MIN_TIMER_DELAY -- Restrict to the lowest time that the C_Timer API allows us
 	end
@@ -81,6 +82,7 @@ local function new(self, loop, func, delay, ...)
 		argsCount = select("#", ...),
 		delay = delay,
 		ends = currentTime + delay,
+		cancelled = false,
 		...
 	}, timerMT)
 
@@ -91,6 +93,12 @@ local function new(self, loop, func, delay, ...)
 		-- String function callback (method call)
 		-- Cache the method lookup for better performance
 		local method = self[func]
+		if not method then
+			-- Safety check: if method doesn't exist, cancel the timer
+			activeTimers[timer] = nil
+			return timer
+		end
+
 		timer.callback = function()
 			if timer.cancelled then return end
 
@@ -107,12 +115,7 @@ local function new(self, loop, func, delay, ...)
 			else
 				-- Find and remove the timer from activeTimers
 				-- This approach avoids the need for handle properties
-				for k, v in next, activeTimers do
-					if v == timer then
-						activeTimers[k] = nil
-						break
-					end
-				end
+				activeTimers[timer] = nil
 			end
 		end
 	else
@@ -131,14 +134,8 @@ local function new(self, loop, func, delay, ...)
 				C_TimerAfter(ndelay, timer.callback)
 				timer.ends = time + ndelay
 			else
-				-- Find and remove the timer from activeTimers
-				-- Linear search is acceptable since this only happens once per timer
-				for k, v in next, activeTimers do
-					if v == timer then
-						activeTimers[k] = nil
-						break
-					end
-				end
+				-- Remove the timer directly from activeTimers
+				activeTimers[timer] = nil
 			end
 		end
 	end
@@ -209,6 +206,9 @@ function AceTimer:ScheduleRepeatingTimer(func, delay, ...)
 		end
 	end
 
+	-- Enforce minimum delay to prevent timer spam
+	delay = max(delay, MIN_TIMER_DELAY)
+
 	-- Use C_Timer.NewTicker if available for repeating timers (more efficient)
 	if C_TimerNewTicker and type(func) ~= "string" then
 		local args = {...}
@@ -230,7 +230,7 @@ function AceTimer:ScheduleRepeatingTimer(func, delay, ...)
 			end
 		end
 
-		local ticker = C_TimerNewTicker(max(delay, MIN_TIMER_DELAY), callback)
+		local ticker = C_TimerNewTicker(delay, callback)
 		wrapper.ticker = ticker
 
 		-- Add cancel method to the wrapper
@@ -259,11 +259,19 @@ end
 -- and the timer has not fired yet or was canceled before.
 -- @param id The id of the timer, as returned by `:ScheduleTimer` or `:ScheduleRepeatingTimer`
 function AceTimer:CancelTimer(id)
+	-- Quick return if id is nil or not a valid type
+	if id == nil then return false end
+
 	local timer = activeTimers[id]
 
 	if not timer then
 		return false
 	else
+		-- Prevent double cancellation
+		if timer.cancelled then
+			return true
+		end
+
 		-- Handle C_Timer.NewTicker objects differently
 		if timer.Cancel and type(timer.Cancel) == "function" then
 			return timer:Cancel()
@@ -281,9 +289,18 @@ function AceTimer:CancelAllTimers()
 	-- This avoids modifying the activeTimers table while iterating
 	-- which could lead to unpredictable behavior
 	local toCancel = {}
+	local count = 0
+	local MAX_TIMERS_PER_FRAME = 100 -- Limit how many timers we process at once
+
 	for k, v in next, activeTimers do
 		if v.object == self then
-			toCancel[k] = true
+			if not v.cancelled then -- Skip already cancelled timers
+				toCancel[k] = true
+				count = count + 1
+				if count >= MAX_TIMERS_PER_FRAME then
+					break -- Process in batches to avoid script timeout
+				end
+			end
 		end
 	end
 
@@ -291,6 +308,11 @@ function AceTimer:CancelAllTimers()
 	-- Two-phase cancellation ensures safe iteration
 	for k in next, toCancel do
 		AceTimer.CancelTimer(self, k)
+	end
+
+	-- If we hit the limit, schedule another run to process remaining timers
+	if count >= MAX_TIMERS_PER_FRAME then
+		C_Timer.After(0.01, function() self:CancelAllTimers() end)
 	end
 end
 
@@ -426,11 +448,20 @@ end
 
 -- Add timer prototype methods
 function timerPrototype:Cancel()
+	-- Prevent double cancellation
+	if self.cancelled then
+		return true
+	end
+
+	-- Mark as cancelled immediately to prevent recursive cancellation
+	self.cancelled = true
+
 	-- Find the key for this timer in activeTimers
 	-- This approach works with both direct timer objects and wrapper objects
 	for k, v in next, activeTimers do
 		if v == self then
-			return AceTimer.CancelTimer(self.object, k)
+			activeTimers[k] = nil
+			return true
 		end
 	end
 	return false
