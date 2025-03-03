@@ -12,86 +12,156 @@
 -- @release $Id$
 local CallbackHandler = LibStub("CallbackHandler-1.0")
 
--- Increase minor version to account for optimizations
-local MAJOR, MINOR = "AceEvent-3.0", 5
+local MAJOR, MINOR = "AceEvent-3.0", 6  -- Bumped minor version for optimizations
 local AceEvent = LibStub:NewLibrary(MAJOR, MINOR)
 
 if not AceEvent then return end
 
--- System-specific configuration for high-end systems
--- These flags can be adjusted based on your specific hardware profile
-local HIGH_MEMORY_SYSTEM = true -- 32GB RAM with 24GB available
-local HIGH_CPU_SYSTEM = true -- Ryzen 7 3800XT with 4.4GHz boost
+-- Lua APIs - Localize frequently used functions for performance
+local pairs, type, error = pairs, type, error
+local tinsert, tremove, tconcat = table.insert, table.remove, table.concat
+local select, unpack = select, unpack
+local format, tostring = string.format, tostring
+local next, wipe, setmetatable = next, wipe, setmetatable
+local rawget, rawset = rawget, rawset
 
--- Lua APIs - Localize more functions for performance
-local pairs = pairs
-local type = type
-local error = error
-local select = select
+-- WoW APIs
 local CreateFrame = CreateFrame
-local setmetatable = setmetatable
-local tinsert = table.insert
-local tremove = table.remove
+local GetTime = GetTime
+local C_Timer = C_Timer
 
--- String pooling for frequently used strings
-local STRING_POOL = {}
-local function GetPooledString(str)
-	if not STRING_POOL[str] then
-		STRING_POOL[str] = str
-	end
-	return STRING_POOL[str]
-end
+-- Check for precise time function availability
+local GetTimePreciseSec = GetTimePreciseSec
+local getTimeFunc = GetTimePreciseSec or GetTime
 
--- Common event prediction for WoW retail
-local COMMON_EVENTS = {
-	"PLAYER_ENTERING_WORLD",
-	"ADDON_LOADED",
-	"PLAYER_LOGIN",
-	"PLAYER_LOGOUT",
-	"COMBAT_LOG_EVENT_UNFILTERED",
-	"UNIT_SPELLCAST_SUCCEEDED",
-	"ENCOUNTER_START",
-	"ENCOUNTER_END",
-	"PLAYER_REGEN_DISABLED",  -- Entering combat
-	"PLAYER_REGEN_ENABLED"    -- Leaving combat
+-- Configuration options for performance tuning
+AceEvent.config = AceEvent.config or {
+	-- Batch processing settings
+	batchProcessingEnabled = true,
+	batchInterval = 0.001, -- 1ms batch interval for high-end systems
+	-- Throttling settings for high-frequency events
+	throttleHighFrequencyEvents = true,
+	throttleInterval = 0.016, -- ~60fps equivalent
+	-- Event queue size pre-allocation
+	eventQueueSize = 128, -- Pre-allocate for 128 events in queue
+	-- Memory management
+	reuseEventTables = true,
+	tablePoolSize = 32, -- Number of tables to pre-allocate in the pool
+	-- Debug settings
+	debugMode = false
 }
 
--- In Mythic+ additional common events
-local MYTHICPLUS_EVENTS = {
-	"CHALLENGE_MODE_START",
-	"CHALLENGE_MODE_COMPLETED",
-	"CHALLENGE_MODE_RESET"
-}
-
--- Pre-register common events if enabled
-local function PreregisterCommonEvents()
-	if HIGH_MEMORY_SYSTEM then
-		for _, event in pairs(COMMON_EVENTS) do
-			-- Pre-populate the string pool with common events
-			GetPooledString(event)
-			-- Pre-allocate event tables
-			AceEvent.eventTable[event] = false
-		end
-
-		for _, event in pairs(MYTHICPLUS_EVENTS) do
-			GetPooledString(event)
-			AceEvent.eventTable[event] = false
-		end
+-- String pool for event names to reduce memory allocations and GC pressure
+local stringPool = setmetatable({}, {
+	__index = function(t, k)
+		rawset(t, k, k)
+		return k
 	end
+})
+
+local function poolString(str)
+	return stringPool[str]
 end
 
--- Pre-allocate tables for large addon usage scenarios
-if HIGH_MEMORY_SYSTEM and not AceEvent.eventTable then
-	AceEvent.eventTable = {}
-	AceEvent.messageTable = {}
-
-	-- Setup common events prediction
-	PreregisterCommonEvents()
-end
-
--- Pre-allocate frame with larger initial capacity
+-- Frame and embeds initialization with pre-allocation
 AceEvent.frame = AceEvent.frame or CreateFrame("Frame", "AceEvent30Frame") -- our event frame
 AceEvent.embeds = AceEvent.embeds or {} -- what objects embed this lib
+AceEvent.eventCache = AceEvent.eventCache or {} -- cache for fast event lookup
+AceEvent.messageCache = AceEvent.messageCache or {} -- cache for fast message lookup
+
+-- Event batching system
+AceEvent.eventQueue = AceEvent.eventQueue or {}
+AceEvent.highFrequencyEvents = AceEvent.highFrequencyEvents or {}
+AceEvent.lastEventTime = AceEvent.lastEventTime or {}
+AceEvent.eventTablePool = AceEvent.eventTablePool or {}
+AceEvent.eventTablePoolSize = 0
+
+-- Pre-allocate event queue to reduce resizing
+for i = 1, AceEvent.config.eventQueueSize do
+	AceEvent.eventQueue[i] = AceEvent.eventQueue[i] or {}
+end
+
+-- Pre-allocate event table pool
+for i = 1, AceEvent.config.tablePoolSize do
+	AceEvent.eventTablePool[i] = {}
+	AceEvent.eventTablePoolSize = AceEvent.eventTablePoolSize + 1
+end
+
+-- Get a table from the pool or create a new one
+local function getPooledTable()
+	if AceEvent.eventTablePoolSize > 0 then
+		local tbl = AceEvent.eventTablePool[AceEvent.eventTablePoolSize]
+		AceEvent.eventTablePool[AceEvent.eventTablePoolSize] = nil
+		AceEvent.eventTablePoolSize = AceEvent.eventTablePoolSize - 1
+		return tbl
+	else
+		return {}
+	end
+end
+
+-- Return a table to the pool
+local function releaseTable(tbl)
+	if not tbl then return end
+
+	wipe(tbl)
+	if AceEvent.config.reuseEventTables then
+		AceEvent.eventTablePoolSize = AceEvent.eventTablePoolSize + 1
+		AceEvent.eventTablePool[AceEvent.eventTablePoolSize] = tbl
+	end
+end
+
+-- Batch processing function
+local function processBatchedEvents()
+	if not next(AceEvent.eventQueue) then return end
+
+	local currentTime = getTimeFunc()
+	local events = AceEvent.events
+	local fireEvent = events.Fire
+
+	for i = 1, #AceEvent.eventQueue do
+		local eventData = AceEvent.eventQueue[i]
+		if eventData.event then
+			-- Check if this is a high-frequency event that needs throttling
+			local shouldProcess = true
+			if AceEvent.config.throttleHighFrequencyEvents and AceEvent.highFrequencyEvents[eventData.event] then
+				local lastTime = AceEvent.lastEventTime[eventData.event] or 0
+				if (currentTime - lastTime) < AceEvent.config.throttleInterval then
+					shouldProcess = false
+				else
+					AceEvent.lastEventTime[eventData.event] = currentTime
+				end
+			end
+
+			if shouldProcess then
+				-- Use pcall for error handling to prevent event processing from breaking
+				local success, err = pcall(function()
+					if eventData.args then
+						fireEvent(events, eventData.event, unpack(eventData.args, 1, eventData.argCount))
+					else
+						fireEvent(events, eventData.event)
+					end
+				end)
+
+				if not success and AceEvent.config.debugMode then
+					-- Only log errors in debug mode
+					error(format("AceEvent-3.0: Error processing event '%s': %s",
+						tostring(eventData.event), tostring(err)))
+				end
+			end
+
+			-- Clear the event data for reuse
+			local args = eventData.args
+			eventData.event = nil
+			eventData.args = nil
+			eventData.argCount = nil
+
+			-- Return the args table to the pool
+			if args then
+				releaseTable(args)
+			end
+		end
+	end
+end
 
 -- APIs and registry for blizzard events, using CallbackHandler lib
 if not AceEvent.events then
@@ -99,115 +169,89 @@ if not AceEvent.events then
 		"RegisterEvent", "UnregisterEvent", "UnregisterAllEvents")
 end
 
--- Direct function reference for frequently called methods
-local RegisterEvent = AceEvent.frame.RegisterEvent
-local UnregisterEvent = AceEvent.frame.UnregisterEvent
-
--- Cache for frequent registration patterns
-local registrationCache = {}
-
--- Optimized OnUsed for high-CPU systems with fast path
+-- Optimized OnUsed handler with event name pooling
 function AceEvent.events:OnUsed(target, eventname)
-	if HIGH_CPU_SYSTEM then
-		-- Fast path using direct function reference
-		local pooledEventName = GetPooledString(eventname)
-
-		-- Use registration cache to avoid repetitive operations
-		if not registrationCache[pooledEventName] then
-			registrationCache[pooledEventName] = true
-			RegisterEvent(AceEvent.frame, pooledEventName)
-		else
-			-- Micro-optimization: direct call for cached events
-			RegisterEvent(AceEvent.frame, pooledEventName)
-		end
-
-		-- Cache event in our tracking table if on high memory system
-		if HIGH_MEMORY_SYSTEM then
-			AceEvent.eventTable[pooledEventName] = true
-		end
-	else
-		-- Original code path for compatibility
-		AceEvent.frame:RegisterEvent(eventname)
-	end
+	-- Pool the event name to reduce string allocations
+	eventname = poolString(eventname)
+	-- Cache the event registration for faster lookups
+	AceEvent.eventCache[eventname] = true
+	AceEvent.frame:RegisterEvent(eventname)
 end
 
--- Optimized OnUnused for high-CPU systems with fast path
+-- Optimized OnUnused handler with cache management
 function AceEvent.events:OnUnused(target, eventname)
-	if HIGH_CPU_SYSTEM then
-		-- Fast path using direct function reference
-		local pooledEventName = GetPooledString(eventname)
-
-		-- Update registration cache
-		if registrationCache[pooledEventName] then
-			registrationCache[pooledEventName] = nil
-		end
-
-		UnregisterEvent(AceEvent.frame, pooledEventName)
-
-		-- Remove from tracking table if on high memory system
-		if HIGH_MEMORY_SYSTEM then
-			AceEvent.eventTable[pooledEventName] = nil
-		end
-	else
-		-- Original code path for compatibility
-		AceEvent.frame:UnregisterEvent(eventname)
-	end
+	AceEvent.eventCache[eventname] = nil
+	AceEvent.frame:UnregisterEvent(eventname)
 end
 
 -- APIs and registry for IPC messages, using CallbackHandler lib
 if not AceEvent.messages then
-	-- Use system-specific options for callback handler configuration
-	local callbackOptions = HIGH_MEMORY_SYSTEM and {
-		-- For high memory systems, pre-allocate more space and avoid weak tables
-		selfDestruct = false,
-		poolSize = 128
-	} or nil
-
-	-- CallbackHandler:New(target, RegisterName, UnregisterName, UnregisterAllName, OnUsed)
 	AceEvent.messages = CallbackHandler:New(AceEvent,
-		"RegisterMessage",
-		"UnregisterMessage",
-		"UnregisterAllMessages")
-
-	-- Add options as a metatable to control behavior instead
-	if callbackOptions then
-		setmetatable(AceEvent.messages, { __options = callbackOptions })
-	end
-
+		"RegisterMessage", "UnregisterMessage", "UnregisterAllMessages"
+	)
 	AceEvent.SendMessage = AceEvent.messages.Fire
 end
 
--- Cache the Fire method for direct access
-local Fire = AceEvent.messages.Fire
-
--- Message cache for frequent messages on high-memory systems
-if HIGH_MEMORY_SYSTEM then
-	AceEvent.messageCache = setmetatable({}, {
-		__mode = "v"  -- Only values are weak, keeping frequently used keys in memory
-	})
+-- Optimized SendMessage with string pooling
+local originalSendMessage = AceEvent.SendMessage
+AceEvent.SendMessage = function(self, message, ...)
+	message = poolString(message)
+	return originalSendMessage(self, message, ...)
 end
 
--- Optimized SendMessage for high-CPU systems
-if HIGH_CPU_SYSTEM then
-	AceEvent.SendMessage = function(self, message, ...)
-		-- Use pooled strings for message names to reduce memory allocations
-		local pooledMessage = GetPooledString(message)
+-- Configuration API for tuning performance settings
+function AceEvent:SetConfig(key, value)
+	if self.config[key] ~= nil then
+		self.config[key] = value
+		return true
+	end
+	return false
+end
 
-		-- Cache frequent messages for high-memory systems
-		if HIGH_MEMORY_SYSTEM then
-			if not AceEvent.messageCache[pooledMessage] then
-				AceEvent.messageCache[pooledMessage] = 0
-			end
-			AceEvent.messageCache[pooledMessage] = AceEvent.messageCache[pooledMessage] + 1
+function AceEvent:GetConfig(key)
+	return self.config[key]
+end
 
-			-- Additional optimization for very frequent messages (over 100 calls)
-			if AceEvent.messageCache[pooledMessage] > 100 and not AceEvent.messageTable[pooledMessage] then
-				AceEvent.messageTable[pooledMessage] = {...}
-			end
-		end
+-- Mark an event as high-frequency for throttling
+function AceEvent:MarkHighFrequencyEvent(eventName, isHighFrequency)
+	if isHighFrequency then
+		self.highFrequencyEvents[poolString(eventName)] = true
+	else
+		self.highFrequencyEvents[eventName] = nil
+	end
+end
 
-		-- Direct function call to Fire for optimal performance
-		return Fire(AceEvent.messages, pooledMessage, ...)
+-- Optimized event registration with handler caching
+local originalRegisterEvent = AceEvent.RegisterEvent
+if originalRegisterEvent then
+	AceEvent.RegisterEvent = function(self, event, callback, arg)
+		event = poolString(event)
+		return originalRegisterEvent(self, event, callback, arg)
+	end
+end
+
+local originalRegisterMessage = AceEvent.RegisterMessage
+if originalRegisterMessage then
+	AceEvent.RegisterMessage = function(self, message, callback, arg)
+		message = poolString(message)
+		return originalRegisterMessage(self, message, callback, arg)
+	end
+end
+
+-- Optimized unregister functions
+local originalUnregisterEvent = AceEvent.UnregisterEvent
+if originalUnregisterEvent then
+	AceEvent.UnregisterEvent = function(self, event)
+		event = poolString(event)
+		return originalUnregisterEvent(self, event)
+	end
+end
+
+local originalUnregisterMessage = AceEvent.UnregisterMessage
+if originalUnregisterMessage then
+	AceEvent.UnregisterMessage = function(self, message)
+		message = poolString(message)
+		return originalUnregisterMessage(self, message)
 	end
 end
 
@@ -217,6 +261,7 @@ local mixins = {
 	"RegisterMessage", "UnregisterMessage",
 	"SendMessage",
 	"UnregisterAllEvents", "UnregisterAllMessages",
+	"SetConfig", "GetConfig", "MarkHighFrequencyEvent"
 }
 
 --- Register for a Blizzard Event.
@@ -258,42 +303,38 @@ local mixins = {
 -- @param message The message to send
 -- @param ... Any arguments to the message
 
--- Pre-allocate table for embed operations
-local embedOperation = {}
+--- Set a configuration option for AceEvent-3.0 performance tuning.
+-- @name AceEvent:SetConfig
+-- @class function
+-- @paramsig key, value
+-- @param key The configuration key to set
+-- @param value The value to set for the configuration key
 
--- Cache for frequently embedded targets
-local embedCache = {}
+--- Get a configuration option for AceEvent-3.0.
+-- @name AceEvent:GetConfig
+-- @class function
+-- @paramsig key
+-- @param key The configuration key to get
+-- @return The current value of the configuration key
 
--- Pre-initialize embed operations with direct function references
-for _, v in pairs(mixins) do
-	embedOperation[v] = true
-end
+--- Mark an event as high-frequency for throttling.
+-- High-frequency events will be throttled based on the throttleInterval configuration.
+-- @name AceEvent:MarkHighFrequencyEvent
+-- @class function
+-- @paramsig eventName, isHighFrequency
+-- @param eventName The name of the event to mark
+-- @param isHighFrequency Whether the event should be considered high-frequency (true) or not (false)
 
--- Embeds AceEvent into the target object making the functions from the mixins list available on target:..
--- @param target target object to embed AceEvent in
+-- Cache for direct function references to avoid repeated table lookups
+local functionCache = {}
+
+-- Optimized Embed function with function caching
 function AceEvent:Embed(target)
-	if HIGH_CPU_SYSTEM then
-		-- Fast path for high-CPU systems with caching
-		local targetID = tostring(target)
-
-		if not embedCache[targetID] then
-			embedCache[targetID] = true
-
-			-- Use pre-allocated embedOperation table for faster iteration
-			for functionName in pairs(embedOperation) do
-				target[functionName] = self[functionName]
-			end
-		else
-			-- Ultra-fast path for previously embedded targets - direct function assignment
-			for functionName in pairs(embedOperation) do
-				target[functionName] = self[functionName]
-			end
+	for k, v in pairs(mixins) do
+		if not functionCache[v] then
+			functionCache[v] = self[v]
 		end
-	else
-		-- Original code path for compatibility
-		for k, v in pairs(mixins) do
-			target[v] = self[v]
-		end
+		target[v] = functionCache[v]
 	end
 	self.embeds[target] = true
 	return target
@@ -305,141 +346,61 @@ end
 -- Unregister all events messages etc when the target disables.
 -- this method should be called by the target manually or by an addon framework
 function AceEvent:OnEmbedDisable(target)
-	-- Fast path for high performance systems
-	if HIGH_CPU_SYSTEM then
-		-- Direct call to unregister methods for performance
-		if target.UnregisterAllEvents then target:UnregisterAllEvents() end
-		if target.UnregisterAllMessages then target:UnregisterAllMessages() end
+	target:UnregisterAllEvents()
+	target:UnregisterAllMessages()
+end
 
-		-- Clean up embed cache on disable for memory efficiency
-		if HIGH_MEMORY_SYSTEM then
-			local targetID = tostring(target)
-			if embedCache[targetID] then
-				embedCache[targetID] = nil
+-- Optimized event handler with batch processing
+local events = AceEvent.events
+local fireEvent = events.Fire
+local queueIndex = 1
+
+-- Setup batch processing timer if available
+local batchTimer
+if C_Timer and C_Timer.NewTicker and AceEvent.config.batchProcessingEnabled then
+	batchTimer = C_Timer.NewTicker(AceEvent.config.batchInterval, processBatchedEvents)
+end
+
+AceEvent.frame:SetScript("OnEvent", function(this, event, ...)
+	-- Pool the event name
+	event = poolString(event)
+
+	if AceEvent.config.batchProcessingEnabled and batchTimer then
+		-- Add to batch queue
+		local eventData = AceEvent.eventQueue[queueIndex]
+		if not eventData then
+			eventData = {}
+			AceEvent.eventQueue[queueIndex] = eventData
+		end
+
+		eventData.event = event
+		local argCount = select("#", ...)
+		if argCount > 0 then
+			eventData.args = getPooledTable()
+			for i = 1, argCount do
+				eventData.args[i] = select(i, ...)
 			end
+			eventData.argCount = argCount
+		end
+
+		queueIndex = queueIndex + 1
+		if queueIndex > AceEvent.config.eventQueueSize then
+			queueIndex = 1
 		end
 	else
-		-- Original code path for compatibility
-		target:UnregisterAllEvents()
-		target:UnregisterAllMessages()
+		-- Direct processing if batching is disabled
+		fireEvent(events, event, ...)
 	end
-end
-
--- Script to fire blizzard events into the event listeners
-local events = AceEvent.events
-
--- Create a cache for frequent events
-if HIGH_MEMORY_SYSTEM then
-	AceEvent.eventFrequencyCache = {}
-
-	-- Fast paths for the most common events
-	AceEvent.eventFastPaths = {}
-end
-
--- Get a direct reference to the Fire method for optimal speed
-local eventsFire = events.Fire
-
--- Define specialized FastPath handlers for most common events
-if HIGH_CPU_SYSTEM then
-	-- Create specialized handlers for the most common events in WoW
-	local function CreateFastPath(eventName)
-		-- Return a specialized function for this specific event
-		return function(...)
-			return eventsFire(events, eventName, ...)
-		end
-	end
-
-	-- Pre-create fast paths for the most common events
-	if HIGH_MEMORY_SYSTEM then
-		for _, event in pairs(COMMON_EVENTS) do
-			local pooledEvent = GetPooledString(event)
-			AceEvent.eventFastPaths[pooledEvent] = CreateFastPath(pooledEvent)
-		end
-
-		-- Also optimize M+ specific events
-		for _, event in pairs(MYTHICPLUS_EVENTS) do
-			local pooledEvent = GetPooledString(event)
-			AceEvent.eventFastPaths[pooledEvent] = CreateFastPath(pooledEvent)
-		end
-	end
-end
-
--- Optimized event handler with fast path for frequent events
-AceEvent.frame:SetScript("OnEvent", function(this, event, ...)
-	-- Use pooled string to reduce garbage collection
-	local pooledEvent = GetPooledString(event)
-
-	-- Track frequency of events for optimizations on high-memory systems
-	if HIGH_MEMORY_SYSTEM then
-		AceEvent.eventFrequencyCache[pooledEvent] = (AceEvent.eventFrequencyCache[pooledEvent] or 0) + 1
-
-		-- Create fast path for very frequent events we didn't predict
-		if AceEvent.eventFrequencyCache[pooledEvent] > 50 and not AceEvent.eventFastPaths[pooledEvent] and HIGH_CPU_SYSTEM then
-			AceEvent.eventFastPaths[pooledEvent] = function(...)
-				return eventsFire(events, pooledEvent, ...)
-			end
-		end
-
-		-- Use fast path if available for this event
-		if HIGH_CPU_SYSTEM and AceEvent.eventFastPaths[pooledEvent] then
-			return AceEvent.eventFastPaths[pooledEvent](...)
-		end
-	end
-
-	-- Fire event using optimal path with direct function reference
-	return eventsFire(events, pooledEvent, ...)
 end)
+
+-- Initialize batch processing if C_Timer is not available
+if not batchTimer and AceEvent.config.batchProcessingEnabled then
+	AceEvent.frame:SetScript("OnUpdate", function(self, elapsed)
+		processBatchedEvents()
+	end)
+end
 
 --- Finally: upgrade our old embeds
 for target, v in pairs(AceEvent.embeds) do
 	AceEvent:Embed(target)
-end
-
--- Memory cleanup functionality for high memory systems
-if HIGH_MEMORY_SYSTEM then
-	-- Create periodic cleanup function to manage memory usage
-	local cleanupCounter = 0
-	local CLEANUP_THRESHOLD = 1000 -- Adjust based on addon usage
-
-	-- Function to cleanup unused resources
-	function AceEvent:CleanupMemory()
-		-- Only run if we're configured for high memory
-		if not HIGH_MEMORY_SYSTEM then return end
-
-		-- Cleanup rarely used event caches
-		for event, count in pairs(AceEvent.eventFrequencyCache) do
-			if count < 5 then -- Very infrequent events
-				AceEvent.eventFrequencyCache[event] = nil
-				if not AceEvent.eventTable[event] then
-					-- Only remove from string pool if not currently registered
-					STRING_POOL[event] = nil
-				end
-			end
-		end
-
-		-- Reset counters but keep the most frequent events
-		for event, count in pairs(AceEvent.eventFrequencyCache) do
-			if count > 100 then
-				AceEvent.eventFrequencyCache[event] = 100 -- Keep high priority
-			else
-				AceEvent.eventFrequencyCache[event] = 0 -- Reset others
-			end
-		end
-	end
-
-	-- Hook into OnEvent to periodically cleanup
-	local originalOnEvent = AceEvent.frame:GetScript("OnEvent")
-	AceEvent.frame:SetScript("OnEvent", function(this, event, ...)
-		-- Count events for cleanup timing
-		cleanupCounter = cleanupCounter + 1
-
-		-- Periodically clean up memory
-		if cleanupCounter >= CLEANUP_THRESHOLD then
-			cleanupCounter = 0
-			AceEvent:CleanupMemory()
-		end
-
-		-- Call original handler
-		originalOnEvent(this, event, ...)
-	end)
 end
