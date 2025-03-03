@@ -2,19 +2,36 @@
 -- @class file
 -- @name AceDBOptions-3.0
 -- @release $Id$
-local ACEDBO_MAJOR, ACEDBO_MINOR = "AceDBOptions-3.0", 15
+local ACEDBO_MAJOR, ACEDBO_MINOR = "AceDBOptions-3.0", 16
 local AceDBOptions = LibStub:NewLibrary(ACEDBO_MAJOR, ACEDBO_MINOR)
 
 if not AceDBOptions then return end -- No upgrade needed
 
 -- Lua APIs
-local pairs, next = pairs, next
+local pairs, next, type, tostring, select = pairs, next, type, tostring, select
+local tinsert, tremove, tconcat, wipe = table.insert, table.remove, table.concat, table.wipe
+local format, gsub, lower = string.format, string.gsub, string.lower
 
 -- WoW APIs
 local UnitClass = UnitClass
+local GetLocale = GetLocale
+local NORMAL_FONT_COLOR_CODE = NORMAL_FONT_COLOR_CODE
+local FONT_COLOR_CODE_CLOSE = FONT_COLOR_CODE_CLOSE
 
+-- String pool for frequently used strings
+local STRING_POOL = {
+    PROFILE = "Profile",
+    DEFAULT = "Default",
+    NEW = "New",
+    COPY = "Copy",
+    DELETE = "Delete",
+    RESET = "Reset"
+}
+
+-- Pre-allocated tables
 AceDBOptions.optionTables = AceDBOptions.optionTables or {}
 AceDBOptions.handlers = AceDBOptions.handlers or {}
+local profilesCache = {} -- Reusable table for profile lists
 
 --[[
 	Localization of AceDBOptions-3.0
@@ -235,45 +252,65 @@ local tmpprofiles = {}
 -- @param nocurrent If true, then getProfileList will not display the current profile in the list
 -- @return Hashtable of all profiles with the internal name as keys and the display name as value.
 local function getProfileList(db, common, nocurrent)
-	local profiles = {}
+	-- Clear and reuse the profiles cache table instead of creating a new one
+	for k in pairs(profilesCache) do
+		profilesCache[k] = nil
+	end
 
-	-- copy existing profiles into the table
+	-- Get current profile once to avoid multiple calls
 	local currentProfile = db:GetCurrentProfile()
-	for i,v in pairs(db:GetProfiles(tmpprofiles)) do
+
+	-- Efficiently copy existing profiles into the table
+	local dbProfiles = db:GetProfiles(tmpprofiles)
+	for _, v in pairs(dbProfiles) do
 		if not (nocurrent and v == currentProfile) then
-			profiles[v] = v
+			profilesCache[v] = v
 		end
 	end
 
-	-- add our default profiles to choose from ( or rename existing profiles)
-	for k,v in pairs(defaultProfiles) do
-		if (common or profiles[k]) and not (nocurrent and k == currentProfile) then
-			profiles[k] = v
+	-- Add default profiles efficiently
+	if defaultProfiles then
+		for k, v in pairs(defaultProfiles) do
+			if (common or profilesCache[k]) and not (nocurrent and k == currentProfile) then
+				profilesCache[k] = v
+			end
 		end
 	end
 
-	return profiles
+	return profilesCache
 end
 
 --[[
 	OptionsHandlerPrototype
 	prototype class for handling the options in a sane way
 ]]
-local OptionsHandlerPrototype = {}
+local OptionsHandlerPrototype = {
+	-- Pre-allocated tables for profile operations
+	_valueCache = {},
+}
 
 --[[ Reset the profile ]]
 function OptionsHandlerPrototype:Reset()
 	self.db:ResetProfile()
+	-- Clear caches on reset
+	self._cachedCurrentText = nil
+	self._lastProfile = nil
 end
 
 --[[ Set the profile to value ]]
 function OptionsHandlerPrototype:SetProfile(info, value)
 	self.db:SetProfile(value)
+	-- Clear caches on profile change
+	self._cachedCurrentText = nil
+	self._lastProfile = nil
 end
 
 --[[ returns the currently active profile ]]
 function OptionsHandlerPrototype:GetCurrentProfile()
-	return self.db:GetCurrentProfile()
+	if not self._lastProfile then
+		self._lastProfile = self.db:GetCurrentProfile()
+	end
+	return self._lastProfile
 end
 
 --[[
@@ -289,6 +326,13 @@ end
 function OptionsHandlerPrototype:ListProfiles(info)
 	local arg = info.arg
 	local profiles
+
+	-- Use cached results if available and valid
+	local cacheKey = format("%s_%s_%s", tostring(arg), tostring(self._lastProfile), tostring(self.noDefaultProfiles))
+	if self._valueCache[cacheKey] then
+		return self._valueCache[cacheKey]
+	end
+
 	if arg == "common" and not self.noDefaultProfiles then
 		profiles = getProfileList(self.db, true, nil)
 	elseif arg == "nocurrent" then
@@ -299,6 +343,8 @@ function OptionsHandlerPrototype:ListProfiles(info)
 		profiles = getProfileList(self.db)
 	end
 
+	-- Cache the results
+	self._valueCache[cacheKey] = profiles
 	return profiles
 end
 
@@ -310,36 +356,59 @@ end
 --[[ Copy a profile ]]
 function OptionsHandlerPrototype:CopyProfile(info, value)
 	self.db:CopyProfile(value)
+	-- Clear caches after copy
+	self._cachedCurrentText = nil
+	self._lastProfile = nil
+	wipe(self._valueCache)
 end
 
 --[[ Delete a profile from the db ]]
 function OptionsHandlerPrototype:DeleteProfile(info, value)
 	self.db:DeleteProfile(value)
+	-- Clear caches after delete
+	self._cachedCurrentText = nil
+	self._lastProfile = nil
+	wipe(self._valueCache)
 end
 
 --[[ fill defaultProfiles with some generic values ]]
+local playerClass
 local function generateDefaultProfiles(db)
+	if not playerClass then
+		playerClass = UnitClass("player")
+	end
 	defaultProfiles = {
 		["Default"] = L["default"],
 		[db.keys.char] = db.keys.char,
 		[db.keys.realm] = db.keys.realm,
-		[db.keys.class] = UnitClass("player")
+		[db.keys.class] = playerClass
 	}
 end
 
 --[[ create and return a handler object for the db, or upgrade it if it already existed ]]
 local function getOptionsHandler(db, noDefaultProfiles)
+	if type(db) ~= "table" or not db.keys or not db.sv or not db.defaults or not db.parent then
+		error("Usage: GetOptionsTable(database): 'database' must be an AceDB-3.0 database object", 2)
+	end
+
 	if not defaultProfiles then
 		generateDefaultProfiles(db)
 	end
 
-	local handler = AceDBOptions.handlers[db] or { db = db, noDefaultProfiles = noDefaultProfiles }
+	-- Create new handler or get existing one
+	local handler = AceDBOptions.handlers[db]
+	if not handler then
+		handler = {}
+		handler.db = db
+		handler.noDefaultProfiles = noDefaultProfiles
+		AceDBOptions.handlers[db] = handler
+	end
 
+	-- Copy prototype methods
 	for k,v in pairs(OptionsHandlerPrototype) do
 		handler[k] = v
 	end
 
-	AceDBOptions.handlers[db] = handler
 	return handler
 end
 
@@ -351,37 +420,52 @@ local optionsTable = {
 		order = 1,
 		type = "description",
 		name = L["intro"] .. "\n",
+		_cached = true, -- Mark static strings that don't need regeneration
 	},
 	descreset = {
 		order = 9,
 		type = "description",
 		name = L["reset_desc"],
+		_cached = true,
 	},
 	reset = {
 		order = 10,
 		type = "execute",
-		name = L["reset"],
+		name = STRING_POOL.RESET,
 		desc = L["reset_sub"],
 		func = "Reset",
+		_cached = true,
 	},
 	current = {
 		order = 11,
 		type = "description",
-		name = function(info) return L["current"] .. " " .. NORMAL_FONT_COLOR_CODE .. info.handler:GetCurrentProfile() .. FONT_COLOR_CODE_CLOSE end,
+		name = function(info)
+			if not info.handler._cachedCurrentText or info.handler._lastProfile ~= info.handler:GetCurrentProfile() then
+				info.handler._lastProfile = info.handler:GetCurrentProfile()
+				info.handler._cachedCurrentText = format("%s %s%s%s",
+					L["current"],
+					NORMAL_FONT_COLOR_CODE,
+					info.handler._lastProfile,
+					FONT_COLOR_CODE_CLOSE)
+			end
+			return info.handler._cachedCurrentText
+		end,
 		width = "default",
 	},
 	choosedesc = {
 		order = 20,
 		type = "description",
 		name = "\n" .. L["choose_desc"],
+		_cached = true,
 	},
 	new = {
-		name = L["new"],
+		name = STRING_POOL.NEW,
 		desc = L["new_sub"],
 		type = "input",
 		order = 30,
 		get = false,
 		set = "SetProfile",
+		_cached = true,
 	},
 	choose = {
 		name = L["choose"],
@@ -392,32 +476,36 @@ local optionsTable = {
 		set = "SetProfile",
 		values = "ListProfiles",
 		arg = "common",
+		_cached = true,
 	},
 	copydesc = {
 		order = 50,
 		type = "description",
 		name = "\n" .. L["copy_desc"],
+		_cached = true,
 	},
 	copyfrom = {
 		order = 60,
 		type = "select",
-		name = L["copy"],
+		name = STRING_POOL.COPY,
 		desc = L["copy_desc"],
 		get = false,
 		set = "CopyProfile",
 		values = "ListProfiles",
 		disabled = "HasNoProfiles",
 		arg = "nocurrent",
+		_cached = true,
 	},
 	deldesc = {
 		order = 70,
 		type = "description",
 		name = "\n" .. L["delete_desc"],
+		_cached = true,
 	},
 	delete = {
 		order = 80,
 		type = "select",
-		name = L["delete"],
+		name = STRING_POOL.DELETE,
 		desc = L["delete_sub"],
 		get = false,
 		set = "DeleteProfile",
@@ -426,6 +514,7 @@ local optionsTable = {
 		arg = "nocurrent",
 		confirm = true,
 		confirmText = L["delete_confirm"],
+		_cached = true,
 	},
 }
 
@@ -436,16 +525,27 @@ local optionsTable = {
 -- -- Assuming `options` is your top-level options table and `self.db` is your database:
 -- options.args.profiles = LibStub("AceDBOptions-3.0"):GetOptionsTable(self.db)
 function AceDBOptions:GetOptionsTable(db, noDefaultProfiles)
-	local tbl = AceDBOptions.optionTables[db] or {
+	-- Reuse existing table if possible
+	local tbl = AceDBOptions.optionTables[db]
+	if not tbl then
+		tbl = {
 			type = "group",
 			name = L["profiles"],
 			desc = L["profiles_sub"],
 		}
+		AceDBOptions.optionTables[db] = tbl
+	end
 
-	tbl.handler = getOptionsHandler(db, noDefaultProfiles)
-	tbl.args = optionsTable
+	-- Only update handler if needed
+	if not tbl.handler or tbl.handler.db ~= db then
+		tbl.handler = getOptionsHandler(db, noDefaultProfiles)
+	end
 
-	AceDBOptions.optionTables[db] = tbl
+	-- Ensure args are set
+	if not tbl.args then
+		tbl.args = optionsTable
+	end
+
 	return tbl
 end
 
