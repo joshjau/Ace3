@@ -36,15 +36,10 @@
 -- @name AceBucket-3.0.lua
 -- @release $Id$
 
-local MAJOR, MINOR = "AceBucket-3.0", 5
+local MAJOR, MINOR = "AceBucket-3.0", 5  -- Bumped minor version from 4 to 5 for performance optimizations
 local AceBucket, oldminor = LibStub:NewLibrary(MAJOR, MINOR)
 
 if not AceBucket then return end -- No Upgrade needed
-
--- Configuration flags for high-end systems
-local HIGH_END_SYSTEM = true  -- Enables memory-intensive optimizations for systems with 16GB+ RAM
-local PREALLOCATE_SIZE = 32   -- Number of table slots to pre-allocate; higher values use more memory but reduce resizing
-local STRING_POOLING = true   -- Reduces string GC pressure by storing common strings once in memory
 
 AceBucket.buckets = AceBucket.buckets or {}
 AceBucket.embeds = AceBucket.embeds or {}
@@ -52,169 +47,124 @@ AceBucket.embeds = AceBucket.embeds or {}
 -- the libraries will be lazyly bound later, to avoid errors due to loading order issues
 local AceEvent, AceTimer
 
--- Lua APIs - Expanded and more complete set of localized functions
-local tconcat, tremove, tinsert = table.concat, table.remove, table.insert
+-- Lua APIs - Localize all frequently used functions for performance
+local tconcat = table.concat
+local tinsert, tremove, twipe = table.insert, table.remove, table.wipe
 local type, next, pairs, ipairs, select = type, next, pairs, ipairs, select
 local tonumber, tostring, rawset, rawget = tonumber, tostring, rawset, rawget
-local assert, loadstring, error, pcall = assert, loadstring, error, pcall
-local math_floor, math_ceil = math.floor, math.ceil
-local string_format = string.format
-local geterrorhandler = geterrorhandler
+local assert, error = assert, error
+local format, strfind, strsub = string.format, string.find, string.sub
+local floor, ceil, abs = math.floor, math.ceil, math.abs
+local min, max = math.min, math.max
+local GetTime = GetTime
 
--- String pool for common strings to reduce memory allocations
--- This helps reduce GC pressure by ensuring frequently used strings exist only once in memory
--- Particularly useful for unit IDs and event names that get reused often
-local StringPool = {}
-local function GetPooledString(str)
-	if not STRING_POOLING then return str end
-	if not StringPool[str] then
-		StringPool[str] = str
-	end
-	return StringPool[str]
+-- WoW API - Localize for performance
+local C_Timer = C_Timer
+
+-- String pool for common strings to reduce memory fragmentation
+local stringPool = setmetatable({}, {__mode = "k"})
+local function poolString(str)
+    if not str then return nil end
+    if not stringPool[str] then
+        stringPool[str] = str
+    end
+    return stringPool[str]
 end
 
--- Common strings that will be pooled
-local NIL_STRING = GetPooledString("nil")  -- Used for nil arguments in events
-local HANDLER_STRING = GetPooledString("handler")  -- Used as the handler method name
+-- Table recycling for bucket data
+local bucketCache = setmetatable({}, {__mode = 'k'})
+local receivedCache = setmetatable({}, {__mode = 'k'})
 
--- Replace weak table with standard table to fully utilize memory
--- On high-end systems, caching more objects improves performance at the cost of higher memory usage
-local bucketCache = {}
-local bucketCacheSize = 0
-local MAX_CACHE_SIZE = HIGH_END_SYSTEM and 100 or 20  -- Cache size tuned for available system memory
-
---[[
-	 xpcall safecall implementation
-]]
-local xpcall = xpcall
-
-local function errorhandler(err)
-	return geterrorhandler()(err)
-end
-
-local function safecall(func, ...)
-	if func then
-		return xpcall(func, errorhandler, ...)
-	end
-end
-
--- Table handling utility for high-performance operations
--- More reliable pre-allocation technique for Lua 5.1
-local function PreAllocateTable(tbl, size)
-    -- Only pre-allocate if we're on a high-end system and a size is specified
-    if HIGH_END_SYSTEM and size and size > 0 then
-        -- This forces Lua to allocate hash table space, reducing incremental growth costs
-        -- First set values to force hash table allocation
-        for i = 1, size do
-            tbl[i] = true
-        end
-        -- Then clear the table while preserving the allocated capacity
-        for i = 1, size do
-            tbl[i] = nil
-        end
+-- Get a clean table from cache or create a new one
+local function getReceivedTable()
+    local tbl = next(receivedCache)
+    if tbl then
+        receivedCache[tbl] = nil
+    else
+        tbl = {}
     end
     return tbl
 end
 
--- Creates a new pre-allocated table with reserved capacity
-local function CreateTable(size)
-    local tbl = {}
-    return PreAllocateTable(tbl, size)
+-- Release a table back to the cache
+local function releaseReceivedTable(tbl)
+    if not tbl then return end
+    twipe(tbl)
+    receivedCache[tbl] = true
 end
 
--- Wipe a table and optionally pre-allocate slots
--- More efficient than creating new tables repeatedly
-local function WipeTable(tbl, size)
-    if not tbl then return tbl end
+--[[
+     xpcall safecall implementation
+]]
+local xpcall = xpcall
 
-    -- Clear existing contents
-    for k in pairs(tbl) do
-        tbl[k] = nil
+local function errorhandler(err)
+    return geterrorhandler()(err)
+end
+
+local function safecall(func, ...)
+    if func then
+        return xpcall(func, errorhandler, ...)
     end
-
-    -- Pre-allocate if requested
-    return PreAllocateTable(tbl, size)
 end
-
--- Do NOT create a table.wipe global as it doesn't exist in vanilla Lua 5.1
 
 -- FireBucket ( bucket )
 --
 -- send the bucket to the callback function and schedule the next FireBucket in interval seconds
--- Optimized to minimize table churn and maximize reuse of allocated memory
 local function FireBucket(bucket)
-	local received = bucket.received
+    local received = bucket.received
 
-	-- Fast check for empty buckets
-	if next(received) ~= nil then
-		-- Cache the callback information for faster access
-		local callback = bucket.callback
-		local object = bucket.object
+    -- we dont want to fire empty buckets
+    if next(received) ~= nil then
+        local callback = bucket.callback
+        local object = bucket.object
 
-		-- Fast path for string callbacks (most common)
-		if type(callback) == "string" then
-			local method = object[callback]
-			safecall(method, object, received)
-		else
-			safecall(callback, received)
-		end
+        -- Call the callback with the received data
+        if type(callback) == "string" then
+            safecall(object[callback], object, received)
+        else
+            safecall(callback, received)
+        end
 
-		-- Pre-allocate a new received table for better performance
-		-- This avoids the need to clear the old one which can be expensive
-		if HIGH_END_SYSTEM then
-			-- On high-end systems, we can afford to create a new table
-			-- and cache the old one for later reuse
-			local oldReceived = received
-			local newReceived = CreateTable(PREALLOCATE_SIZE)
-			bucket.received = newReceived
+        -- Clear the received table for reuse instead of creating a new one
+        twipe(received)
 
-			-- Clear the old table for reuse
-			WipeTable(oldReceived)
-
-			-- Store in a temporary cache if cache isn't too large
-			if bucketCacheSize < MAX_CACHE_SIZE then
-				bucketCacheSize = bucketCacheSize + 1
-				bucketCache[bucketCacheSize] = oldReceived
-			end
-		else
-			-- On lower-end systems, just clear the existing table
-			WipeTable(received)
-		end
-
-		-- Schedule the next execution
-		bucket.timer = AceTimer.ScheduleTimer(bucket, FireBucket, bucket.interval, bucket)
-	else -- if it was empty, clear the timer and wait for the next event
-		bucket.timer = nil
-	end
+        -- If using C_Timer is available and enabled, use it for more precise timing
+        if C_Timer and bucket.useNewTimer then
+            bucket.timer = C_Timer.NewTimer(bucket.interval, function() FireBucket(bucket) end)
+        else
+            -- Otherwise fall back to AceTimer
+            bucket.timer = AceTimer.ScheduleTimer(bucket, FireBucket, bucket.interval, bucket)
+        end
+    else -- if it was empty, clear the timer and wait for the next event
+        bucket.timer = nil
+    end
 end
 
 -- BucketHandler ( event, arg1 )
 --
 -- callback func for AceEvent
 -- stores arg1 in the received table, and schedules the bucket if necessary
--- Optimized with string pooling and fast paths for common operations
 local function BucketHandler(self, event, arg1)
-	-- Fast path for nil (common case)
-	if arg1 == nil then
-		arg1 = NIL_STRING
-	elseif STRING_POOLING and type(arg1) == "string" then
-		-- Use string pooling for string arguments
-		arg1 = GetPooledString(arg1)
-	end
+    -- Pool common arg1 strings to reduce memory fragmentation
+    if arg1 == nil then
+        arg1 = poolString("nil")
+    elseif type(arg1) == "string" then
+        arg1 = poolString(arg1)
+    end
 
-	-- Fast path for first occurrence of this arg1
-	local received = self.received
-	local count = received[arg1]
-	if count then
-		received[arg1] = count + 1
-	else
-		received[arg1] = 1
-	end
+    -- Increment the counter for this arg1
+    self.received[arg1] = (self.received[arg1] or 0) + 1
 
-	-- Fast scheduling check
-	if not self.timer then
-		self.timer = AceTimer.ScheduleTimer(self, FireBucket, self.interval, self)
-	end
+    -- if we are not scheduled yet, start a timer on the interval for our bucket to be cleared
+    if not self.timer then
+        -- Use C_Timer if available for more precise timing
+        if C_Timer and self.useNewTimer then
+            self.timer = C_Timer.NewTimer(self.interval, function() FireBucket(self) end)
+        else
+            self.timer = AceTimer.ScheduleTimer(self, FireBucket, self.interval, self)
+        end
+    end
 end
 
 -- RegisterBucket( event, interval, callback, isMessage )
@@ -224,79 +174,72 @@ end
 -- callback(func or string) - function pointer, or method name of the object, that gets called when the bucket is cleared
 -- isMessage(boolean) - register AceEvent Messages instead of game events
 local function RegisterBucket(self, event, interval, callback, isMessage)
-	-- try to fetch the librarys
-	if not AceEvent or not AceTimer then
-		AceEvent = LibStub:GetLibrary("AceEvent-3.0", true)
-		AceTimer = LibStub:GetLibrary("AceTimer-3.0", true)
-		if not AceEvent or not AceTimer then
-			error(MAJOR .. " requires AceEvent-3.0 and AceTimer-3.0", 3)
-		end
-	end
+    -- try to fetch the librarys
+    if not AceEvent or not AceTimer then
+        AceEvent = LibStub:GetLibrary("AceEvent-3.0", true)
+        AceTimer = LibStub:GetLibrary("AceTimer-3.0", true)
+        if not AceEvent or not AceTimer then
+            error(MAJOR .. " requires AceEvent-3.0 and AceTimer-3.0", 3)
+        end
+    end
 
-	if type(event) ~= "string" and type(event) ~= "table" then error("Usage: RegisterBucket(event, interval, callback): 'event' - string or table expected.", 3) end
-	if not callback then
-		if type(event) == "string" then
-			callback = event
-		else
-			error("Usage: RegisterBucket(event, interval, callback): cannot omit callback when event is not a string.", 3)
-		end
-	end
-	if not tonumber(interval) then error("Usage: RegisterBucket(event, interval, callback): 'interval' - number expected.", 3) end
-	if type(callback) ~= "string" and type(callback) ~= "function" then error("Usage: RegisterBucket(event, interval, callback): 'callback' - string or function or nil expected.", 3) end
-	if type(callback) == "string" and type(self[callback]) ~= "function" then error("Usage: RegisterBucket(event, interval, callback): 'callback' - method not found on target object.", 3) end
+    if type(event) ~= "string" and type(event) ~= "table" then error("Usage: RegisterBucket(event, interval, callback): 'event' - string or table expected.", 3) end
+    if not callback then
+        if type(event) == "string" then
+            callback = event
+        else
+            error("Usage: RegisterBucket(event, interval, callback): cannot omit callback when event is not a string.", 3)
+        end
+    end
+    if not tonumber(interval) then error("Usage: RegisterBucket(event, interval, callback): 'interval' - number expected.", 3) end
+    if type(callback) ~= "string" and type(callback) ~= "function" then error("Usage: RegisterBucket(event, interval, callback): 'callback' - string or function or nil expected.", 3) end
+    if type(callback) == "string" and type(self[callback]) ~= "function" then error("Usage: RegisterBucket(event, interval, callback): 'callback' - method not found on target object.", 3) end
 
-	-- Use cached bucket if available or create a pre-allocated one
-	local bucket
+    -- Get a bucket from cache or create a new one
+    local bucket = next(bucketCache)
+    if bucket then
+        bucketCache[bucket] = nil
+        -- Reset the bucket properties
+        bucket.object = self
+        bucket.callback = callback
+        bucket.interval = tonumber(interval)
+        bucket.received = bucket.received or getReceivedTable()
+        bucket.handler = BucketHandler
+        bucket.timer = nil
+        -- Check if we can use C_Timer for more precise timing
+        bucket.useNewTimer = C_Timer ~= nil
+    else
+        bucket = {
+            object = self,
+            callback = callback,
+            interval = tonumber(interval),
+            received = getReceivedTable(),
+            handler = BucketHandler,
+            useNewTimer = C_Timer ~= nil
+        }
+    end
 
-	-- Try to get a bucket from the cache first
-	if bucketCacheSize > 0 then
-		bucket = bucketCache[bucketCacheSize]
-		bucketCache[bucketCacheSize] = nil
-		bucketCacheSize = bucketCacheSize - 1
+    -- Cache the registration function for performance
+    local regFunc = isMessage and AceEvent.RegisterMessage or AceEvent.RegisterEvent
 
-		-- Make sure we have a received table
-		if not bucket.received then
-			-- Pre-allocate with estimated size when possible
-			bucket.received = WipeTable({}, PREALLOCATE_SIZE)
-		end
-	else
-		-- Create a new bucket with pre-allocated table
-		local received = CreateTable(PREALLOCATE_SIZE)
-		bucket = { handler = BucketHandler, received = received }
-	end
+    -- Register events
+    if type(event) == "table" then
+        for _, e in pairs(event) do
+            -- Pool event strings to reduce memory fragmentation
+            e = poolString(e)
+            regFunc(bucket, e, "handler")
+        end
+    else
+        -- Pool event string to reduce memory fragmentation
+        event = poolString(event)
+        regFunc(bucket, event, "handler")
+    end
 
-	bucket.object, bucket.callback, bucket.interval = self, callback, tonumber(interval)
+    -- Create a unique handle for this bucket
+    local handle = tostring(bucket)
+    AceBucket.buckets[handle] = bucket
 
-	-- Use cached function references for faster registration
-	local regFunc = isMessage and AceEvent.RegisterMessage or AceEvent.RegisterEvent
-
-	-- Optimize event registration loop
-	if type(event) == "table" then
-		-- First pass: handle array part (numerically indexed values)
-		-- This optimizes for the common case of array-style event tables
-		for i = 1, #event do
-			local e = event[i]
-			if type(e) == "string" then -- Only register string events
-				regFunc(bucket, e, HANDLER_STRING)
-			end
-		end
-
-		-- Second pass: handle hash part (named keys)
-		-- This handles the less common case of events stored as table keys
-		for k, v in pairs(event) do
-			-- Skip numeric keys that were already processed in the array part
-			if type(k) == "string" then
-				regFunc(bucket, k, HANDLER_STRING)
-			end
-		end
-	else
-		regFunc(bucket, event, HANDLER_STRING)
-	end
-
-	local handle = tostring(bucket)
-	AceBucket.buckets[handle] = bucket
-
-	return handle
+    return handle
 end
 
 --- Register a Bucket for an event (or a set of events)
@@ -312,7 +255,7 @@ end
 --   -- do stuff
 -- end
 function AceBucket:RegisterBucketEvent(event, interval, callback)
-	return RegisterBucket(self, event, interval, callback, false)
+    return RegisterBucket(self, event, interval, callback, false)
 end
 
 --- Register a Bucket for an AceEvent-3.0 addon message (or a set of messages)
@@ -328,87 +271,78 @@ end
 --   -- do stuff
 -- end
 function AceBucket:RegisterBucketMessage(message, interval, callback)
-	return RegisterBucket(self, message, interval, callback, true)
+    return RegisterBucket(self, message, interval, callback, true)
 end
 
 --- Unregister any events and messages from the bucket and clear any remaining data.
--- Optimized to reuse buckets and maintain the performance benefits of pre-allocated tables
 -- @param handle The handle of the bucket as returned by RegisterBucket*
 function AceBucket:UnregisterBucket(handle)
-	local bucket = AceBucket.buckets[handle]
-	if bucket then
-		-- Use direct function references for faster unregistration
-		AceEvent.UnregisterAllEvents(bucket)
-		AceEvent.UnregisterAllMessages(bucket)
+    local bucket = AceBucket.buckets[handle]
+    if bucket then
+        -- Unregister all events and messages
+        AceEvent.UnregisterAllEvents(bucket)
+        AceEvent.UnregisterAllMessages(bucket)
 
-		-- If the timer exists, cancel it
-		if bucket.timer then
-			AceTimer.CancelTimer(bucket, bucket.timer)
-			bucket.timer = nil
-		end
+        -- Cancel any pending timer
+        if bucket.timer then
+            if C_Timer and bucket.useNewTimer then
+                bucket.timer:Cancel()
+            else
+                AceTimer.CancelTimer(bucket, bucket.timer)
+            end
+            bucket.timer = nil
+        end
 
-		-- Reuse the received table by clearing it
-		local received = bucket.received
-		if received then
-			WipeTable(received)
-		end
+        -- Release the received table back to the cache
+        releaseReceivedTable(bucket.received)
+        bucket.received = nil
 
-		-- Remove from active buckets
-		AceBucket.buckets[handle] = nil
+        -- Remove from active buckets
+        AceBucket.buckets[handle] = nil
 
-		-- Store the bucket in our cache for reuse
-		if bucketCacheSize < MAX_CACHE_SIZE then
-			bucketCacheSize = bucketCacheSize + 1
-			bucketCache[bucketCacheSize] = bucket
-		end
-	end
+        -- Store our bucket in the cache for reuse
+        bucketCache[bucket] = true
+    end
 end
 
 --- Unregister all buckets of the current addon object (or custom "self").
--- Optimized to avoid modifying tables during iteration
 function AceBucket:UnregisterAllBuckets()
-	-- Collect handles first to avoid table modification during iteration
-	local toUnregister = {}
-	local count = 0
+    -- Create a local cache of handles to avoid modification during iteration
+    local handles = {}
+    for handle, bucket in pairs(AceBucket.buckets) do
+        if bucket.object == self then
+            tinsert(handles, handle)
+        end
+    end
 
-	-- Find all buckets belonging to this object
-	for handle, bucket in pairs(AceBucket.buckets) do
-		if bucket.object == self then
-			count = count + 1
-			toUnregister[count] = handle
-		end
-	end
-
-	-- Unregister each bucket
-	for i = 1, count do
-		AceBucket.UnregisterBucket(self, toUnregister[i])
-	end
+    -- Unregister all buckets in the local cache
+    for _, handle in ipairs(handles) do
+        AceBucket.UnregisterBucket(self, handle)
+    end
 end
-
-
 
 -- embedding and embed handling
 local mixins = {
-	"RegisterBucketEvent",
-	"RegisterBucketMessage",
-	"UnregisterBucket",
-	"UnregisterAllBuckets",
+    "RegisterBucketEvent",
+    "RegisterBucketMessage",
+    "UnregisterBucket",
+    "UnregisterAllBuckets",
 }
 
 -- Embeds AceBucket into the target object making the functions from the mixins list available on target:..
 -- @param target target object to embed AceBucket in
-function AceBucket:Embed( target )
-	for _, v in pairs( mixins ) do
-		target[v] = self[v]
-	end
-	self.embeds[target] = true
-	return target
+function AceBucket:Embed(target)
+    for _, v in pairs(mixins) do
+        target[v] = self[v]
+    end
+    self.embeds[target] = true
+    return target
 end
 
-function AceBucket:OnEmbedDisable( target )
-	target:UnregisterAllBuckets()
+function AceBucket:OnEmbedDisable(target)
+    target:UnregisterAllBuckets()
 end
 
 for addon in pairs(AceBucket.embeds) do
-	AceBucket:Embed(addon)
+    AceBucket:Embed(addon)
 end
