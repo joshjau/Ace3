@@ -2,7 +2,7 @@
 -- @class file
 -- @name AceLocale-3.0
 -- @release $Id$
-local MAJOR,MINOR = "AceLocale-3.0", 6
+local MAJOR,MINOR = "AceLocale-3.0", 7
 
 local AceLocale, oldminor = LibStub:NewLibrary(MAJOR, MINOR)
 
@@ -11,27 +11,57 @@ if not AceLocale then return end -- no upgrade needed
 -- Lua APIs
 local assert, tostring, error = assert, tostring, error
 local getmetatable, setmetatable, rawset, rawget = getmetatable, setmetatable, rawset, rawget
+local type, pairs, select = type, pairs, select
+local format, gsub, concat = string.format, string.gsub, table.concat
+local next = next
 
+-- WoW APIs
+local GetLocale = GetLocale
+
+-- Initialize game locale
 local gameLocale = GetLocale()
 if gameLocale == "enGB" then
 	gameLocale = "enUS"
 end
 
+-- String pool for common operations
+local STRING_POOL = {
+	MISSING_ENTRY = ": Missing entry for '",
+	USAGE_ERROR = "Usage: GetLocale(application[, silent]): 'application' - No locales registered for '",
+	SILENT_ERROR = "Usage: NewLocale(application, locale[, isDefault[, silent]]): 'silent' must be specified for the first locale registered",
+}
+
+-- Efficient string concatenation helper
+local function fastconcat(...)
+	return concat({...}, "")
+end
+
 AceLocale.apps = AceLocale.apps or {}          -- array of ["AppName"]=localetableref
 AceLocale.appnames = AceLocale.appnames or {}  -- array of [localetableref]="AppName"
+
+-- Cache for error handler to avoid repeated lookups
+local geterrorhandler = geterrorhandler
+local errorhandler = geterrorhandler()
+
+-- Optimized error message generation
+local function generateErrorMessage(self, key)
+	return fastconcat(MAJOR, ": ", tostring(AceLocale.appnames[self]), STRING_POOL.MISSING_ENTRY, tostring(key), "'")
+end
 
 -- This metatable is used on all tables returned from GetLocale
 local readmeta = {
 	__index = function(self, key) -- requesting totally unknown entries: fire off a nonbreaking error and return key
+		if key == nil then return nil end
 		rawset(self, key, key)      -- only need to see the warning once, really
-		geterrorhandler()(MAJOR..": "..tostring(AceLocale.appnames[self])..": Missing entry for '"..tostring(key).."'")
+		errorhandler(generateErrorMessage(self, key))
 		return key
 	end
 }
 
--- This metatable is used on all tables returned from GetLocale if the silent flag is true, it does not issue a warning on unknown keys
+-- This metatable is used on all tables returned from GetLocale if the silent flag is true
 local readmetasilent = {
 	__index = function(self, key) -- requesting totally unknown entries: return key
+		if key == nil then return nil end
 		rawset(self, key, key)      -- only need to invoke this function once
 		return key
 	end
@@ -44,29 +74,52 @@ local registering
 -- local assert false function
 local assertfalse = function() assert(false) end
 
--- This metatable proxy is used when registering nondefault locales
+-- Optimized write proxy for non-default locales
 local writeproxy = setmetatable({}, {
 	__newindex = function(self, key, value)
-		rawset(registering, key, value == true and key or value) -- assigning values: replace 'true' with key string
+		if key == nil then return end
+		rawset(registering, key, value == true and key or value)
 	end,
 	__index = assertfalse
 })
 
--- This metatable proxy is used when registering the default locale.
--- It refuses to overwrite existing values
--- Reason 1: Allows loading locales in any order
--- Reason 2: If 2 modules have the same string, but only the first one to be
---           loaded has a translation for the current locale, the translation
---           doesn't get overwritten.
---
+-- Optimized write proxy for default locale
 local writedefaultproxy = setmetatable({}, {
 	__newindex = function(self, key, value)
+		if key == nil then return end
 		if not rawget(registering, key) then
 			rawset(registering, key, value == true and key or value)
 		end
 	end,
 	__index = assertfalse
 })
+
+-- Pre-allocated tables for common operations
+local EMPTY_TABLE = {}
+local DEFAULT_TABLE_SIZE = 128  -- Typical size for most locale tables
+
+-- Table pool for reuse
+local tablePool = setmetatable({}, {__mode = "k"})  -- Weak keys for GC
+
+-- Get a clean table from pool or create new
+local function acquireTable()
+	local tbl = next(tablePool)
+	if tbl then
+		tablePool[tbl] = nil
+		return tbl
+	end
+	return {}, DEFAULT_TABLE_SIZE
+end
+
+-- Release table back to pool
+local function releaseTable(tbl)
+	if type(tbl) == "table" then
+		for k in pairs(tbl) do
+			tbl[k] = nil
+		end
+		tablePool[tbl] = true
+	end
+end
 
 --- Register a new locale (or extend an existing one) for the specified application.
 -- :NewLocale will return a table you can fill your locale into, or nil if the locale isn't needed for the players
@@ -87,21 +140,20 @@ local writedefaultproxy = setmetatable({}, {
 -- L["string1"] = "Zeichenkette1"
 -- @return Locale Table to add localizations to, or nil if the current locale is not required.
 function AceLocale:NewLocale(application, locale, isDefault, silent)
-
 	-- GAME_LOCALE allows translators to test translations of addons without having that wow client installed
 	local activeGameLocale = GAME_LOCALE or gameLocale
 
 	local app = AceLocale.apps[application]
 
 	if silent and app and getmetatable(app) ~= readmetasilent then
-		geterrorhandler()("Usage: NewLocale(application, locale[, isDefault[, silent]]): 'silent' must be specified for the first locale registered")
+		geterrorhandler()(STRING_POOL.SILENT_ERROR)
 	end
 
 	if not app then
 		if silent=="raw" then
-			app = {}
+			app = acquireTable()
 		else
-			app = setmetatable({}, silent and readmetasilent or readmeta)
+			app = setmetatable(acquireTable(), silent and readmetasilent or readmeta)
 		end
 		AceLocale.apps[application] = app
 		AceLocale.appnames[app] = application
@@ -127,7 +179,7 @@ end
 -- @return The locale table for the current language.
 function AceLocale:GetLocale(application, silent)
 	if not silent and not AceLocale.apps[application] then
-		error("Usage: GetLocale(application[, silent]): 'application' - No locales registered for '"..tostring(application).."'", 2)
+		error(fastconcat(STRING_POOL.USAGE_ERROR, tostring(application), "'"), 2)
 	end
 	return AceLocale.apps[application]
 end
