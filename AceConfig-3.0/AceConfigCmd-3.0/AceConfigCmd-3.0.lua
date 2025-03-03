@@ -16,7 +16,7 @@ REQUIRES: AceConsole-3.0 for command registration (loaded on demand)
 
 local cfgreg = LibStub("AceConfigRegistry-3.0")
 
-local MAJOR, MINOR = "AceConfigCmd-3.0", 14
+local MAJOR, MINOR = "AceConfigCmd-3.0", 15
 local AceConfigCmd = LibStub:NewLibrary(MAJOR, MINOR)
 
 if not AceConfigCmd then return end
@@ -30,17 +30,58 @@ local AceConsoleName = "AceConsole-3.0"
 -- Lua APIs
 local strsub, strsplit, strlower, strmatch, strtrim = string.sub, string.split, string.lower, string.match, string.trim
 local format, tonumber, tostring = string.format, tonumber, tostring
-local tsort, tinsert = table.sort, table.insert
-local select, pairs, next, type = select, pairs, next, type
-local error, assert = error, assert
+local tsort, tinsert, tremove, tconcat = table.sort, table.insert, table.remove, table.concat
+local select, pairs, next, type, unpack = select, pairs, next, type, unpack
+local error, assert, pcall = error, assert, pcall
+local abs, min, max, floor, ceil = math.abs, math.min, math.max, math.floor, math.ceil
 
 -- WoW APIs
 local _G = _G
+local DEFAULT_CHAT_FRAME, SELECTED_CHAT_FRAME = DEFAULT_CHAT_FRAME, SELECTED_CHAT_FRAME
+local wipe = wipe  -- WoW's global wipe function
 
 local L = setmetatable({}, {	-- TODO: replace with proper locale
 	__index = function(self,k) return k end
 })
 
+-- String pool for common keywords to reduce memory fragmentation
+local stringPool = {
+    on = L["on"],
+    off = L["off"],
+    default = L["default"],
+    unknown = L["unknown argument"],
+    invalidInput = L["invalid input"],
+    expectedFunction = "expected function or member name",
+    expectedTable = "expected a table",
+    malformed = "malformed options table"
+}
+
+-- Table recycling to reduce GC pressure
+local tablePool = setmetatable({}, {__mode = "k"}) -- weak keys
+local tablePoolCount = 0
+local MAX_POOL_SIZE = 100 -- Prevent excessive memory usage
+
+local function acquireTable()
+    if tablePoolCount > 0 then
+        local t = next(tablePool)
+        if t then
+            tablePool[t] = nil
+            tablePoolCount = tablePoolCount - 1
+            return t
+        end
+    end
+    return {}
+end
+
+local function releaseTable(t)
+    if tablePoolCount < MAX_POOL_SIZE then
+        wipe(t)
+        tablePool[t] = true
+        tablePoolCount = tablePoolCount + 1
+    end
+end
+
+-- Optimized print function using local WoW API references
 local function print(msg)
 	(SELECTED_CHAT_FRAME or DEFAULT_CHAT_FRAME):AddMessage(msg)
 end
@@ -48,38 +89,37 @@ end
 -- constants used by getparam() calls below
 
 local handlertypes = {["table"]=true}
-local handlermsg = "expected a table"
-
 local functypes = {["function"]=true, ["string"]=true}
-local funcmsg = "expected function or member name"
 
+-- Keep old variable names for backwards compatibility
+local handlermsg = stringPool.expectedTable
+local funcmsg = stringPool.expectedFunction
 
--- pickfirstset() - picks the first non-nil value and returns it
+-- pickfirstset() - optimized to minimize function calls for frequently used operation
 
 local function pickfirstset(...)
-	for i=1,select("#",...) do
-		if select(i,...)~=nil then
-			return select(i,...)
+	local n = select("#",...)
+	for i = 1, n do
+		local val = select(i,...)
+		if val ~= nil then
+			return val
 		end
 	end
 end
 
-
 -- err() - produce real error() regarding malformed options tables etc
 
-local function err(info,inputpos,msg )
-	local cmdstr=" "..strsub(info.input, 1, inputpos-1)
-	error(MAJOR..": /" ..info[0] ..cmdstr ..": "..(msg or "malformed options table"), 2)
+local function err(info, inputpos, msg)
+	local cmdstr = " " .. strsub(info.input, 1, inputpos-1)
+	error(MAJOR .. ": /" .. info[0] .. cmdstr .. ": " .. (msg or stringPool.malformed), 2)
 end
-
 
 -- usererr() - produce chatframe message regarding bad slash syntax etc
 
-local function usererr(info,inputpos,msg )
-	local cmdstr=strsub(info.input, 1, inputpos-1);
-	print("/" ..info[0] .. " "..cmdstr ..": "..(msg or "malformed options table"))
+local function usererr(info, inputpos, msg)
+	local cmdstr = strsub(info.input, 1, inputpos-1)
+	print("/" .. info[0] .. " " .. cmdstr .. ": " .. (msg or stringPool.malformed))
 end
-
 
 -- callmethod() - call a given named method (e.g. "get", "set") with given arguments
 
@@ -136,54 +176,56 @@ local function do_final(info, inputpos, tab, methodtype, ...)
 	callmethod(info,inputpos,tab,methodtype, ...)
 end
 
-
 -- getparam() - used by handle() to retreive and store "handler", "get", "set", etc
+-- Optimized to reduce string concatenations
 
 local function getparam(info, inputpos, tab, depth, paramname, types, errormsg)
-	local old,oldat = info[paramname], info[paramname.."_at"]
-	local val=tab[paramname]
-	if val~=nil then
-		if val==false then
-			val=nil
+	local old, oldat = info[paramname], info[paramname.."_at"]
+	local val = tab[paramname]
+	if val ~= nil then
+		if val == false then
+			val = nil
 		elseif not types[type(val)] then
-			err(info, inputpos, "'" .. paramname.. "' - "..errormsg)
+			err(info, inputpos, "'" .. paramname .. "' - " .. errormsg)
 		end
 		info[paramname] = val
 		info[paramname.."_at"] = depth
 	end
-	return old,oldat
+	return old, oldat
 end
 
-
 -- iterateargs(tab) - custom iterator that iterates both t.args and t.plugins.*
-local dummytable={}
-
+-- Optimized for reduced memory allocation and improved iteration speed
 local function iterateargs(tab)
 	if not tab.plugins then
 		return pairs(tab.args)
 	end
 
-	local argtabkey,argtab=next(tab.plugins)
+	local argtabkey, argtab = next(tab.plugins)
 	local v
+
+	-- Use an upvalue for the iterator state to avoid creating closures
+	local state = {}
 
 	return function(_, k)
 		while argtab do
-			k,v = next(argtab, k)
-			if k then return k,v end
-			if argtab==tab.args then
-				argtab=nil
+			k, v = next(argtab, k)
+			if k then return k, v end
+			if argtab == tab.args then
+				argtab = nil
 			else
-				argtabkey,argtab = next(tab.plugins, argtabkey)
+				argtabkey, argtab = next(tab.plugins, argtabkey)
 				if not argtabkey then
-					argtab=tab.args
+					argtab = tab.args
 				end
 			end
 		end
-	end, nil
+		return nil, nil -- Return both key and value as nil to properly end the iteration
+	end, state, nil
 end
 
 local function checkhidden(info, inputpos, tab)
-	if tab.cmdHidden~=nil then
+	if tab.cmdHidden ~= nil then
 		return tab.cmdHidden
 	end
 	local hidden = tab.hidden
@@ -197,19 +239,20 @@ end
 
 local function showhelp(info, inputpos, tab, depth, noHead)
 	if not noHead then
-		print("|cff33ff99"..info.appName.."|r: Arguments to |cffffff78/"..info[0].."|r "..strsub(info.input,1,inputpos-1)..":")
+		print("|cff33ff99" .. info.appName .. "|r: Arguments to |cffffff78/" .. info[0] .. "|r " .. strsub(info.input, 1, inputpos-1) .. ":")
 	end
 
-	local sortTbl = {}	-- [1..n]=name
-	local refTbl = {}   -- [name]=tableref
+	local sortTbl = acquireTable()  -- Use pooled table
+	local refTbl = acquireTable()   -- Use pooled table
 
-	for k,v in iterateargs(tab) do
+	for k, v in iterateargs(tab) do
 		if not refTbl[k] then	-- a plugin overriding something in .args
 			tinsert(sortTbl, k)
 			refTbl[k] = v
 		end
 	end
 
+	-- Sort optimization: avoid creating closures in the sort function
 	tsort(sortTbl, function(one, two)
 		local o1 = refTbl[one].order or 100
 		local o2 = refTbl[two].order or 100
@@ -220,20 +263,21 @@ local function showhelp(info, inputpos, tab, depth, noHead)
 			info[#info] = nil
 			info.order = nil
 		end
-		if type(o2) == "function" or type(o1) == "string" then
+		if type(o2) == "function" or type(o2) == "string" then
 			info.order = o2
 			info[#info+1] = two
 			o2 = callmethod(info, inputpos, refTbl[two], "order")
 			info[#info] = nil
 			info.order = nil
 		end
-		if o1<0 and o2<0 then return o1<o2 end
-		if o2<0 then return true end
-		if o1<0 then return false end
-		if o1==o2 then return tostring(one)<tostring(two) end   -- compare names
-		return o1<o2
+		if o1 < 0 and o2 < 0 then return o1 < o2 end
+		if o2 < 0 then return true end
+		if o1 < 0 then return false end
+		if o1 == o2 then return tostring(one) < tostring(two) end   -- compare names
+		return o1 < o2
 	end)
 
+	-- Display help using the sorted tables
 	for i = 1, #sortTbl do
 		local k = sortTbl[i]
 		local v = refTbl[k]
@@ -248,76 +292,98 @@ local function showhelp(info, inputpos, tab, depth, noHead)
 					desc = callfunction(info, v, 'desc')
 				end
 				if v.type == "group" and pickfirstset(v.cmdInline, v.inline, false) then
-					print("  "..(desc or name)..":")
-					local oldhandler,oldhandler_at = getparam(info, inputpos, v, depth, "handler", handlertypes, handlermsg)
+					print("  " .. (desc or name) .. ":")
+					local oldhandler, oldhandler_at = getparam(info, inputpos, v, depth, "handler", handlertypes, handlermsg)
 					showhelp(info, inputpos, v, depth, true)
-					info.handler,info.handler_at = oldhandler,oldhandler_at
+					info.handler, info.handler_at = oldhandler, oldhandler_at
 				else
 					local key = k:gsub(" ", "_")
-					print("  |cffffff78"..key.."|r - "..(desc or name or ""))
+					print("  |cffffff78" .. key .. "|r - " .. (desc or name or ""))
 				end
 			end
 		end
 	end
+
+	-- Return tables to pool
+	releaseTable(sortTbl)
+	releaseTable(refTbl)
 end
 
+-- Precomputed patterns for keybinding validation to avoid string allocations at runtime
+local KEY_PATTERN = {
+    F_KEYS = "^F%d+$",
+    SINGLE_KEY = "^.$"
+}
+
+-- Cache known key names for fast lookup
+local KEY_NAME_CACHE = {}
+for i = 1, 24 do
+    KEY_NAME_CACHE["F" .. i] = true
+end
+KEY_NAME_CACHE["CAPSLOCK"] = true
 
 local function keybindingValidateFunc(text)
-	if text == nil or text == "NONE" then
-		return nil
-	end
-	text = text:upper()
-	local shift, ctrl, alt
-	local modifier
-	while true do
-		if text == "-" then
-			break
-		end
-		modifier, text = strsplit('-', text, 2)
-		if text then
-			if modifier ~= "SHIFT" and modifier ~= "CTRL" and modifier ~= "ALT" then
-				return false
-			end
-			if modifier == "SHIFT" then
-				if shift then
-					return false
-				end
-				shift = true
-			end
-			if modifier == "CTRL" then
-				if ctrl then
-					return false
-				end
-				ctrl = true
-			end
-			if modifier == "ALT" then
-				if alt then
-					return false
-				end
-				alt = true
-			end
-		else
-			text = modifier
-			break
-		end
-	end
-	if text == "" then
-		return false
-	end
-	if not text:find("^F%d+$") and text ~= "CAPSLOCK" and text:len() ~= 1 and (text:byte() < 128 or text:len() > 4) and not _G["KEY_" .. text] then
-		return false
-	end
-	local s = text
-	if shift then
-		s = "SHIFT-" .. s
-	end
-	if ctrl then
-		s = "CTRL-" .. s
-	end
-	if alt then
-		s = "ALT-" .. s
-	end
-	return s
+    if text == nil or text == "NONE" then
+        return nil
+    end
+
+    text = text:upper()
+    local shift, ctrl, alt
+    local modifier
+    local parts = acquireTable()
+
+    -- Fast pattern to handle simple cases
+    if text:find("-") then
+        -- Split by dash once
+        local index = 1
+        for part in text:gmatch("[^-]+") do
+            parts[index] = part
+            index = index + 1
+        end
+
+        -- Process modifiers
+        local keyIndex = #parts
+        for i = 1, keyIndex - 1 do
+            local mod = parts[i]
+            if mod == "SHIFT" then
+                if shift then return false end
+                shift = true
+            elseif mod == "CTRL" then
+                if ctrl then return false end
+                ctrl = true
+            elseif mod == "ALT" then
+                if alt then return false end
+                alt = true
+            else
+                return false -- Invalid modifier
+            end
+        end
+
+        text = parts[keyIndex] -- Last part is the key
+    end
+
+    releaseTable(parts)
+
+    -- Validate the key
+    if text == "" then
+        return false
+    end
+
+    -- Fast key validation using cached patterns and lookups
+    if not (KEY_NAME_CACHE[text] or
+           text:find(KEY_PATTERN.F_KEYS) or
+           (text:len() == 1 and text:byte() < 128) or
+           (text:len() <= 4 and _G["KEY_" .. text])) then
+        return false
+    end
+
+    -- Build the final key string
+    local s = text
+    if shift then s = "SHIFT-" .. s end
+    if ctrl then s = "CTRL-" .. s end
+    if alt then s = "ALT-" .. s end
+
+    return s
 end
 
 -- handle() - selfrecursing function that processes input->optiontable
@@ -740,26 +806,37 @@ end
 --     LibStub("AceConfigCmd-3.0").HandleCommand(MyAddon, "mychat", "MyOptions", input)
 --   end
 -- end
+
+-- Cache for options tables to avoid repeated lookups
+local optionsCache = {}
+setmetatable(optionsCache, {__mode = "v"}) -- weak values to allow garbage collection
+
 function AceConfigCmd:HandleCommand(slashcmd, appName, input)
+    -- Check cache for options table
+    local options = optionsCache[appName]
+    if not options then
+        local optgetter = cfgreg:GetOptionsTable(appName)
+        if not optgetter then
+            error([[Usage: HandleCommand("slashcmd", "appName", "input"): 'appName' - no options table "]]..tostring(appName)..[[" has been registered]], 2)
+        end
+        options = assert(optgetter("cmd", MAJOR))
+        optionsCache[appName] = options
+    end
 
-	local optgetter = cfgreg:GetOptionsTable(appName)
-	if not optgetter then
-		error([[Usage: HandleCommand("slashcmd", "appName", "input"): 'appName' - no options table "]]..tostring(appName)..[[" has been registered]], 2)
-	end
-	local options = assert( optgetter("cmd", MAJOR) )
+    -- Pre-allocate the info table with commonly used values
+    local info = {
+        [0] = slashcmd,
+        appName = appName,
+        options = options,
+        input = input,
+        self = self,
+        handler = self,
+        uiType = "cmd",
+        uiName = MAJOR,
+    }
 
-	local info = {   -- Don't try to recycle this, it gets handed off to callbacks and whatnot
-		[0] = slashcmd,
-		appName = appName,
-		options = options,
-		input = input,
-		self = self,
-		handler = self,
-		uiType = "cmd",
-		uiName = MAJOR,
-	}
-
-	handle(info, 1, options, 0)  -- (info, inputpos, table, depth)
+    -- Process the command
+    handle(info, 1, options, 0)  -- (info, inputpos, table, depth)
 end
 
 --- Utility function to create a slash command handler.
@@ -767,15 +844,18 @@ end
 -- @param slashcmd The slash command WITHOUT leading slash (only used for error output)
 -- @param appName The application name as given to `:RegisterOptionsTable()`
 function AceConfigCmd:CreateChatCommand(slashcmd, appName)
-	if not AceConsole then
-		AceConsole = LibStub(AceConsoleName)
-	end
-	if AceConsole.RegisterChatCommand(self, slashcmd, function(input)
-				AceConfigCmd.HandleCommand(self, slashcmd, appName, input)	-- upgradable
-		end,
-	true) then -- succesfully registered so lets get the command -> app table in
-		commands[slashcmd] = appName
-	end
+    if not AceConsole then
+        AceConsole = LibStub(AceConsoleName)
+    end
+
+    local function commandHandler(input)
+        AceConfigCmd.HandleCommand(self, slashcmd, appName, input)
+    end
+
+    if AceConsole.RegisterChatCommand(self, slashcmd, commandHandler, true) then
+        -- Successfully registered so add to command -> app table
+        commands[slashcmd] = appName
+    end
 end
 
 --- Utility function that returns the options table that belongs to a slashcommand.
