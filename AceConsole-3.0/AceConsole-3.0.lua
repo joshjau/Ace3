@@ -10,7 +10,7 @@
 -- @class file
 -- @name AceConsole-3.0
 -- @release $Id$
-local MAJOR,MINOR = "AceConsole-3.0", 7
+local MAJOR,MINOR = "AceConsole-3.0", 8
 
 local AceConsole, oldminor = LibStub:NewLibrary(MAJOR, MINOR)
 
@@ -25,22 +25,35 @@ local tconcat, tostring, select = table.concat, tostring, select
 local type, pairs, error = type, pairs, error
 local format, strfind, strsub = string.format, string.find, string.sub
 local max = math.max
+local wipe = table.wipe or function(t) for k in pairs(t) do t[k] = nil end return t end -- Compatibility for older Lua without table.wipe
 
 -- WoW APIs
 local _G = _G
+local DEFAULT_CHAT_FRAME = DEFAULT_CHAT_FRAME
+local SlashCmdList = SlashCmdList
+local hash_SlashCmdList = hash_SlashCmdList
 
-local tmp={}
-local function Print(self,frame,...)
-	local n=0
+-- Reused message buffer to reduce GC pressure
+local tmp = {}
+local function Print(self, frame, ...)
+	wipe(tmp)
+	local n = 0
+
+	-- Add addon name prefix if not AceConsole itself
 	if self ~= AceConsole then
-		n=n+1
-		tmp[n] = "|cff33ff99"..tostring( self ).."|r:"
+		tmp[1] = "|cff33ff99"..tostring(self).."|r:"
+		n = 1
 	end
-	for i=1, select("#", ...) do
-		n=n+1
+
+	-- Convert all arguments to strings and add to buffer
+	local numArgs = select("#", ...)
+	for i = 1, numArgs do
+		n = n + 1
 		tmp[n] = tostring(select(i, ...))
 	end
-	frame:AddMessage( tconcat(tmp," ",1,n) )
+
+	-- Deliver message
+	frame:AddMessage(tconcat(tmp, " ", 1, n))
 end
 
 --- Print to DEFAULT_CHAT_FRAME or given ChatFrame (anything with an .AddMessage function)
@@ -72,39 +85,55 @@ function AceConsole:Printf(...)
 end
 
 
-
+-- Command registration cache to reduce redundant calls
+local cmd_registry_cache = {}
 
 --- Register a simple chat command
 -- @param command Chat command to be registered WITHOUT leading "/"
 -- @param func Function to call when the slash command is being used (funcref or methodname)
 -- @param persist if false, the command will be soft disabled/enabled when aceconsole is used as a mixin (default: true)
-function AceConsole:RegisterChatCommand( command, func, persist )
-	if type(command)~="string" then error([[Usage: AceConsole:RegisterChatCommand( "command", func[, persist ]): 'command' - expected a string]], 2) end
+function AceConsole:RegisterChatCommand(command, func, persist)
+	if type(command) ~= "string" then
+		error([[Usage: AceConsole:RegisterChatCommand( "command", func[, persist ]): 'command' - expected a string]], 2)
+	end
 
-	if persist==nil then persist=true end	-- I'd rather have my addon's "/addon enable" around if the author screws up. Having some extra slash regged when it shouldnt be isn't as destructive. True is a better default. /Mikk
+	if persist == nil then persist = true end	-- Default to persistent commands
 
-	local name = "ACECONSOLE_"..command:upper()
+	-- Use cached command name if possible to reduce string operations
+	local name = cmd_registry_cache[command]
+	if not name then
+		name = "ACECONSOLE_" .. command:upper()
+		cmd_registry_cache[command] = name
+	end
 
-	if type( func ) == "string" then
+	-- Create the slash command handler function
+	if type(func) == "string" then
+		local self_ref = self
 		SlashCmdList[name] = function(input, editBox)
-			self[func](self, input, editBox)
+			self_ref[func](self_ref, input, editBox)
 		end
 	else
 		SlashCmdList[name] = func
 	end
-	_G["SLASH_"..name.."1"] = "/"..command:lower()
+
+	-- Set up the slash command
+	_G["SLASH_" .. name .. "1"] = "/" .. command:lower()
 	AceConsole.commands[command] = name
-	-- non-persisting commands are registered for enabling disabling
+
+	-- non-persisting commands are registered for enabling/disabling
 	if not persist then
-		if not AceConsole.weakcommands[self] then AceConsole.weakcommands[self] = {} end
+		if not AceConsole.weakcommands[self] then
+			AceConsole.weakcommands[self] = {}
+		end
 		AceConsole.weakcommands[self][command] = func
 	end
+
 	return true
 end
 
 --- Unregister a chatcommand
 -- @param command Chat command to be unregistered WITHOUT leading "/"
-function AceConsole:UnregisterChatCommand( command )
+function AceConsole:UnregisterChatCommand(command)
 	local name = AceConsole.commands[command]
 	if name then
 		SlashCmdList[name] = nil
@@ -116,92 +145,110 @@ end
 
 --- Get an iterator over all Chat Commands registered with AceConsole
 -- @return Iterator (pairs) over all commands
-function AceConsole:IterateChatCommands() return pairs(AceConsole.commands) end
+function AceConsole:IterateChatCommands()
+	return pairs(AceConsole.commands)
+end
 
+-- Recycle tables to reduce garbage collection
+local argsCache = setmetatable({}, {__mode = "k"})
 
+-- Helper function for returning multiple nil values
 local function nils(n, ...)
-	if n>1 then
+	if n > 1 then
 		return nil, nils(n-1, ...)
-	elseif n==1 then
+	elseif n == 1 then
 		return nil, ...
 	else
 		return ...
 	end
 end
 
-
---- Retreive one or more space-separated arguments from a string.
+--- Retrieve one or more space-separated arguments from a string.
 -- Treats quoted strings and itemlinks as non-spaced.
 -- @param str The raw argument string
 -- @param numargs How many arguments to get (default 1)
--- @param startpos Where in the string to start scanning (default  1)
+-- @param startpos Where in the string to start scanning (default 1)
 -- @return Returns arg1, arg2, ..., nextposition\\
 -- Missing arguments will be returned as nils. 'nextposition' is returned as 1e9 at the end of the string.
 function AceConsole:GetArgs(str, numargs, startpos)
 	numargs = numargs or 1
 	startpos = max(startpos or 1, 1)
 
-	local pos=startpos
-
-	-- find start of new arg
-	pos = strfind(str, "[^ ]", pos)
-	if not pos then	-- whoops, end of string
+	-- Quick return if we're at the end of the string
+	if startpos > #str then
 		return nils(numargs, 1e9)
 	end
 
-	if numargs<1 then
+	local pos = startpos
+
+	-- Find start of the first argument
+	pos = strfind(str, "[^ ]", pos)
+	if not pos then  -- No more args, end of string
+		return nils(numargs, 1e9)
+	end
+
+	if numargs < 1 then
 		return pos
 	end
 
-	-- quoted or space separated? find out which pattern to use
-	local delim_or_pipe
+	-- Determine delimiter pattern based on first character
 	local ch = strsub(str, pos, pos)
-	if ch=='"' then
+	local delim_pattern
+
+	if ch == '"' then
 		pos = pos + 1
-		delim_or_pipe='([|"])'
-	elseif ch=="'" then
+		delim_pattern = '([|"])'
+	elseif ch == "'" then
 		pos = pos + 1
-		delim_or_pipe="([|'])"
+		delim_pattern = "([|'])"
 	else
-		delim_or_pipe="([| ])"
+		delim_pattern = "([| ])"
 	end
 
-	startpos = pos
+	local arg_start = pos
+	local arg_end = nil
+	local delimiter = nil
 
-	while true do
-		-- find delimiter or hyperlink
-		local _
-		pos,_,ch = strfind(str, delim_or_pipe, pos)
+	-- Find the end of this argument (delimiter or end of string)
+	while not arg_end do
+		-- Find next delimiter or hyperlink
+		pos, _, delimiter = strfind(str, delim_pattern, pos)
 
-		if not pos then break end
+		if not pos then
+			-- End of string, return remainder as last argument
+			return strsub(str, arg_start), nils(numargs-1, 1e9)
+		end
 
-		if ch=="|" then
-			-- some kind of escape
-
-			if strsub(str,pos,pos+1)=="|H" then
+		if delimiter == "|" then
+			-- Handle WoW UI escape sequences
+			if strsub(str, pos, pos+1) == "|H" then
 				-- It's a |H....|hhyper link!|h
-				pos=strfind(str, "|h", pos+2)	-- first |h
+				pos = strfind(str, "|h", pos+2)  -- first |h
 				if not pos then break end
 
-				pos=strfind(str, "|h", pos+2)	-- second |h
+				pos = strfind(str, "|h", pos+2)  -- second |h
 				if not pos then break end
-			elseif strsub(str,pos, pos+1) == "|T" then
-				-- It's a |T....|t  texture
-				pos=strfind(str, "|t", pos+2)
+
+			elseif strsub(str, pos, pos+1) == "|T" then
+				-- It's a |T....|t texture
+				pos = strfind(str, "|t", pos+2)
 				if not pos then break end
 			end
 
-			pos=pos+2 -- skip past this escape (last |h if it was a hyperlink)
-
+			pos = pos + 2  -- Skip past this escape (or last |h)
 		else
-			-- found delimiter, done with this arg
-			return strsub(str, startpos, pos-1), AceConsole:GetArgs(str, numargs-1, pos+1)
+			-- Real delimiter found, extract the argument
+			arg_end = pos - 1
 		end
-
 	end
 
-	-- search aborted, we hit end of string. return it all as one argument. (yes, even if it's an unterminated quote or hyperlink)
-	return strsub(str, startpos), nils(numargs-1, 1e9)
+	-- Extract the current argument and recursively get the next ones
+	if arg_end then
+		return strsub(str, arg_start, arg_end), AceConsole:GetArgs(str, numargs-1, pos+1)
+	else
+		-- This shouldn't normally happen, but handle it just in case
+		return strsub(str, arg_start), nils(numargs-1, 1e9)
+	end
 end
 
 
@@ -215,32 +262,49 @@ local mixins = {
 	"GetArgs",
 }
 
+-- Cache for embed targets to prevent duplicate embedding
+local embed_cache = {}
+
 -- Embeds AceConsole into the target object making the functions from the mixins list available on target:..
 -- @param target target object to embed AceBucket in
-function AceConsole:Embed( target )
-	for k, v in pairs( mixins ) do
+function AceConsole:Embed(target)
+	-- Skip if already embedded
+	if embed_cache[target] then return target end
+
+	-- Add all mixin functions to the target
+	for _, v in pairs(mixins) do
 		target[v] = self[v]
 	end
+
+	-- Register in embeds table and cache
 	self.embeds[target] = true
+	embed_cache[target] = true
+
 	return target
 end
 
-function AceConsole:OnEmbedEnable( target )
+function AceConsole:OnEmbedEnable(target)
 	if AceConsole.weakcommands[target] then
-		for command, func in pairs( AceConsole.weakcommands[target] ) do
-			target:RegisterChatCommand( command, func, false, true ) -- nonpersisting and silent registry
+		-- Fast re-register all weak commands
+		local wc = AceConsole.weakcommands[target]
+		for command, func in pairs(wc) do
+			target:RegisterChatCommand(command, func, false, true) -- nonpersisting and silent registry
 		end
 	end
 end
 
-function AceConsole:OnEmbedDisable( target )
+function AceConsole:OnEmbedDisable(target)
 	if AceConsole.weakcommands[target] then
-		for command, func in pairs( AceConsole.weakcommands[target] ) do
-			target:UnregisterChatCommand( command ) -- TODO: this could potentially unregister a command from another application in case of command conflicts. Do we care?
+		-- Fast unregister all weak commands
+		local wc = AceConsole.weakcommands[target]
+		for command in pairs(wc) do
+			target:UnregisterChatCommand(command)
 		end
 	end
 end
 
+-- Initialize embeds for any existing addons
 for addon in pairs(AceConsole.embeds) do
+	embed_cache[addon] = true
 	AceConsole:Embed(addon)
 end
