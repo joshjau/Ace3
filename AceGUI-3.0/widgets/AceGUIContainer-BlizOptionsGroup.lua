@@ -70,10 +70,11 @@ Methods
 local methods = {
 	["OnAcquire"] = function(self)
 		self:SetName()
-		self:SetTitle()
 
 		-- Reset layout cache for this instance
 		layoutCache[self] = layoutCache[self] or {}
+
+		self:SetTitle()
 	end,
 
 	["OnRelease"] = function(self)
