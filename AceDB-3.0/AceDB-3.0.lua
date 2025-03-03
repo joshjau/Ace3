@@ -41,26 +41,26 @@
 -- @class file
 -- @name AceDB-3.0.lua
 -- @release $Id$
-local ACEDB_MAJOR, ACEDB_MINOR = "AceDB-3.0", 31 -- Bumped minor version for performance optimizations
+local ACEDB_MAJOR, ACEDB_MINOR = "AceDB-3.0", 31
 local AceDB = LibStub:NewLibrary(ACEDB_MAJOR, ACEDB_MINOR)
 
 if not AceDB then return end -- No upgrade needed
 
--- Lua APIs
+-- Lua APIs - Localize more functions for reduced global lookups
 local type, pairs, next, error = type, pairs, next, error
 local setmetatable, rawset, rawget = setmetatable, rawset, rawget
-local tinsert, tremove = table.insert, table.remove
+local select, tostring, tonumber = select, tostring, tonumber
+local floor, ceil, min, max = math.floor, math.ceil, math.min, math.max
+local tinsert, tremove, wipe, sort = table.insert, table.remove, table.wipe or wipe, table.sort
+local format, gsub, lower, upper = string.format, string.gsub, string.lower, string.upper
+local strlen, strsub, strrep = string.len, string.sub, string.rep
 
--- WoW APIs
+-- WoW APIs - Localize additional commonly used API calls
 local _G = _G
-local GetRealmName, UnitName = GetRealmName, UnitName
-local UnitClass, UnitRace, UnitFactionGroup = UnitClass, UnitRace, UnitFactionGroup
-local GetLocale, GetCurrentRegion = GetLocale, GetCurrentRegion
-local GetCurrentRegionName, CreateFrame = GetCurrentRegionName, CreateFrame
-local wipe = wipe  -- WoW API function
-
--- Performance configuration based on high-end system
-local HIGH_MEMORY_SYSTEM = true -- Flag for 24GB+ available RAM systems
+local GetRealmName = GetRealmName
+local UnitName, UnitClass, UnitRace, UnitFactionGroup = UnitName, UnitClass, UnitRace, UnitFactionGroup
+local GetLocale, GetCurrentRegion, GetCurrentRegionName = GetLocale, GetCurrentRegion, GetCurrentRegionName
+local CreateFrame = CreateFrame
 
 AceDB.db_registry = AceDB.db_registry or {}
 AceDB.frame = AceDB.frame or CreateFrame("Frame")
@@ -70,148 +70,143 @@ local CallbackDummy = { Fire = function() end }
 
 local DBObjectLib = {}
 
--- String pool for common strings to reduce memory fragmentation
-local StringPool = {}
-local function GetPooledString(str)
-    if not StringPool[str] then
-        StringPool[str] = str
-    end
-    return StringPool[str]
+-- Table recycling pool to reduce garbage collection
+local tablePool = setmetatable({}, {__mode = "k"})
+local tablePoolCount = 0
+
+-- Cache frequently accessed data
+local profileCache = setmetatable({}, {__mode = "kv"}) -- weak references to allow garbage collection when needed
+local namespaceCache = setmetatable({}, {__mode = "kv"})
+local sectionCache = setmetatable({}, {__mode = "kv"})
+
+-- Cache invalidation function - call when structure changes
+local function invalidateCache(db, section)
+	if db then
+		if section then
+			sectionCache[db..section] = nil
+		else
+			for k in pairs(profileCache) do
+				if k:match("^"..db) then
+					profileCache[k] = nil
+				end
+			end
+			for k in pairs(namespaceCache) do
+				if k:match("^"..db) then
+					namespaceCache[k] = nil
+				end
+			end
+			for k in pairs(sectionCache) do
+				if k:match("^"..db) then
+					sectionCache[k] = nil
+				end
+			end
+		end
+	end
+end
+
+-- Get a new table, recycled or created
+local function newTable()
+	local t = next(tablePool)
+	if t then
+		tablePool[t] = nil
+		return t
+	else
+		tablePoolCount = tablePoolCount + 1
+		return {}
+	end
+end
+
+-- Release a table to the pool
+local function releaseTable(t)
+	if type(t) ~= "table" then return end
+	wipe(t)
+	tablePool[t] = true
 end
 
 --[[-------------------------------------------------------------------------
 	AceDB Utility Functions
 ---------------------------------------------------------------------------]]
 
--- Performance configuration for high-memory systems
-local tableCacheSize = HIGH_MEMORY_SYSTEM and 10 or 3
-local tableCache = {}
-
--- Get a new table from the cache or create one
--- This reduces garbage collection overhead by reusing tables
--- @return An empty table, either from the cache or newly created
-local function getTable()
-    local tbl = tremove(tableCache)
-    if tbl then
-        return tbl
-    end
-    return {}
-end
-
--- Recycle a table into the cache for future reuse
--- Clears the table and places it in the cache if there's room
--- @param tbl The table to recycle
-local function recycleTable(tbl)
-    if not tbl then return end
-    -- Clear the table
-    wipe(tbl)
-    -- Store it in the cache if we have room
-    if #tableCache < tableCacheSize then
-        tinsert(tableCache, tbl)
-    end
-end
-
--- Simple shallow copy for copying defaults - optimized for high-memory systems
+-- Simple shallow copy for copying defaults
 local function copyTable(src, dest)
-    if type(dest) ~= "table" then dest = getTable() end
-    if type(src) == "table" then
-        -- Fast path for high-memory systems - pre-allocate destination tables
-        if HIGH_MEMORY_SYSTEM then
-            for k,v in pairs(src) do
-                if type(v) == "table" then
-                    if not dest[k] then
-                        dest[k] = getTable()
-                    end
-                    dest[k] = copyTable(v, dest[k])
-                else
-                    dest[k] = v
-                end
-            end
-        else
-            -- Original path for lower memory systems
-            for k,v in pairs(src) do
-                if type(v) == "table" then
-                    -- try to index the key first so that the metatable creates the defaults, if set
-                    v = copyTable(v, dest[k])
-                end
-                dest[k] = v
-            end
-        end
-    end
-    return dest
+	if type(dest) ~= "table" then
+		dest = newTable()
+	end
+
+	if type(src) == "table" then
+		for k,v in pairs(src) do
+			if type(v) == "table" then
+				-- try to index the key first so that the metatable creates the defaults, if set, and use that table
+				if type(dest[k]) ~= "table" then
+					dest[k] = newTable()
+				end
+				copyTable(v, dest[k])
+			else
+				dest[k] = v
+			end
+		end
+	end
+	return dest
 end
 
 -- Called to add defaults to a section of the database
--- Tables returned by ["*"] default sections must be cleaned up by removeDefaults
--- to ensure we don't write empty default tables
+--
+-- When a ["*"] default section is indexed with a new key, a table is returned
+-- and set in the host table.  These tables must be cleaned up by removeDefaults
+-- in order to ensure we don't write empty default tables.
 local function copyDefaults(dest, src)
-    -- Fast path for common case - default with no wildcard entries
-    if HIGH_MEMORY_SYSTEM and not src["*"] and not src["**"] then
-        for k, v in pairs(src) do
-            if type(v) == "table" then
-                if not rawget(dest, k) then
-                    -- Create a new table from the cache for better performance
-                    dest[k] = getTable()
-                end
-                if type(dest[k]) == "table" then
-                    copyDefaults(dest[k], v)
-                end
-            else
-                if rawget(dest, k) == nil then
-                    rawset(dest, k, v)
-                end
-            end
-        end
-        return
-    end
+	-- this happens if some value in the SV overwrites our default value with a non-table
+	if type(dest) ~= "table" then return end
 
-    -- Original path including wildcard handling
-    for k, v in pairs(src) do
-        if k == "*" or k == "**" then
-            if type(v) == "table" then
-                -- This is a metatable used for table defaults
-                local mt = {
-                    -- This handles the lookup and creation of new subtables
-                    __index = function(t,k2)
-                            if k2 == nil then return nil end
-                            local tbl = getTable()
-                            copyDefaults(tbl, v)
-                            rawset(t, k2, tbl)
-                            return tbl
-                        end,
-                }
-                setmetatable(dest, mt)
-                -- handle already existing tables in the SV
-                for dk, dv in pairs(dest) do
-                    if not rawget(src, dk) and type(dv) == "table" then
-                        copyDefaults(dv, v)
-                    end
-                end
-            else
-                -- Values are not tables, so this is just a simple return
-                local mt = {__index = function(t,k2) return k2~=nil and v or nil end}
-                setmetatable(dest, mt)
-            end
-        elseif type(v) == "table" then
-            if not rawget(dest, k) then rawset(dest, k, getTable()) end
-            if type(dest[k]) == "table" then
-                copyDefaults(dest[k], v)
-                if src['**'] then
-                    copyDefaults(dest[k], src['**'])
-                end
-            end
-        else
-            if rawget(dest, k) == nil then
-                rawset(dest, k, v)
-            end
-        end
-    end
+	for k, v in pairs(src) do
+		if k == "*" or k == "**" then
+			if type(v) == "table" then
+				-- This is a metatable used for table defaults
+				local mt = {
+					-- This handles the lookup and creation of new subtables
+					__index = function(t,k2)
+							if k2 == nil then return nil end
+							local tbl = newTable()
+							copyDefaults(tbl, v)
+							rawset(t, k2, tbl)
+							return tbl
+						end,
+				}
+				setmetatable(dest, mt)
+				-- handle already existing tables in the SV
+				for dk, dv in pairs(dest) do
+					if not rawget(src, dk) and type(dv) == "table" then
+						copyDefaults(dv, v)
+					end
+				end
+			else
+				-- Values are not tables, so this is just a simple return
+				local mt = {__index = function(t,k2) return k2~=nil and v or nil end}
+				setmetatable(dest, mt)
+			end
+		elseif type(v) == "table" then
+			if not rawget(dest, k) then
+				rawset(dest, k, newTable())
+			end
+			if type(dest[k]) == "table" then
+				copyDefaults(dest[k], v)
+				if src['**'] then
+					copyDefaults(dest[k], src['**'])
+				end
+			end
+		else
+			if rawget(dest, k) == nil then
+				rawset(dest, k, v)
+			end
+		end
+	end
 end
 
 -- Called to remove all defaults in the default table from the database
 local function removeDefaults(db, defaults, blocker)
 	-- remove all metatables from the db, so we don't accidentally create new sub-tables through them
 	setmetatable(db, nil)
+
 	-- loop through the defaults and remove their content
 	for k,v in pairs(defaults) do
 		if k == "*" or k == "**" then
@@ -225,6 +220,8 @@ local function removeDefaults(db, defaults, blocker)
 							-- if the table is empty afterwards, remove it
 							if next(value) == nil then
 								db[key] = nil
+								-- recycle the now-empty table
+								releaseTable(value)
 							end
 						-- if it was specified, only strip ** content, but block values which were set in the key table
 						elseif k == "**" then
@@ -245,6 +242,8 @@ local function removeDefaults(db, defaults, blocker)
 			removeDefaults(db[k], v, blocker and blocker[k])
 			if next(db[k]) == nil then
 				db[k] = nil
+				-- recycle the now-empty table
+				releaseTable(db[k])
 			end
 		else
 			-- check if the current value matches the default, and that its not blocked by another defaults table
@@ -259,10 +258,18 @@ end
 local function initSection(db, section, svstore, key, defaults)
 	local sv = rawget(db, "sv")
 
+	-- Check cache first for existing initialized sections
+	local cacheKey = tostring(db)..section
+	local cachedTbl = sectionCache[cacheKey]
+	if cachedTbl then
+		rawset(db, section, cachedTbl)
+		return false, cachedTbl
+	end
+
 	local tableCreated
-	if not sv[svstore] then sv[svstore] = getTable() end
+	if not sv[svstore] then sv[svstore] = newTable() end
 	if not sv[svstore][key] then
-		sv[svstore][key] = getTable()
+		sv[svstore][key] = newTable()
 		tableCreated = true
 	end
 
@@ -272,6 +279,9 @@ local function initSection(db, section, svstore, key, defaults)
 		copyDefaults(tbl, defaults)
 	end
 	rawset(db, section, tbl)
+
+	-- Cache the section for future rapid access
+	sectionCache[cacheKey] = tbl
 
 	return tableCreated, tbl
 end
@@ -285,25 +295,41 @@ local dbmt = {
 				local defaultTbl = rawget(t, "defaults")
 				local defaults = defaultTbl and defaultTbl[section]
 
+				-- Check cache first
+				local cacheKey = tostring(t)..section
+				local cachedTbl = sectionCache[cacheKey]
+				if cachedTbl then
+					rawset(t, section, cachedTbl)
+					return cachedTbl
+				end
+
 				if section == "profile" then
-					local new = initSection(t, section, "profiles", key, defaults)
+					local new, tbl = initSection(t, section, "profiles", key, defaults)
 					if new then
 						-- Callback: OnNewProfile, database, newProfileKey
 						t.callbacks:Fire("OnNewProfile", t, key)
 					end
+					return tbl
 				elseif section == "profiles" then
 					local sv = rawget(t, "sv")
-					if not sv.profiles then sv.profiles = {} end
+					if not sv.profiles then sv.profiles = newTable() end
 					rawset(t, "profiles", sv.profiles)
+					return sv.profiles
 				elseif section == "global" then
 					local sv = rawget(t, "sv")
-					if not sv.global then sv.global = {} end
+					if not sv.global then sv.global = newTable() end
 					if defaults then
 						copyDefaults(sv.global, defaults)
 					end
 					rawset(t, section, sv.global)
+
+					-- Cache for future access
+					sectionCache[cacheKey] = sv.global
+
+					return sv.global
 				else
-					initSection(t, section, section, key, defaults)
+					local _, tbl = initSection(t, section, section, key, defaults)
+					return tbl
 				end
 			end
 
@@ -329,21 +355,17 @@ local preserve_keys = {
 	["children"] = true,
 }
 
--- Pre-compute and cache frequently used values
-local realmKey = GetPooledString(GetRealmName())
-local playerName = GetPooledString(UnitName("player"))
-local charKey = GetPooledString(playerName .. " - " .. realmKey)
+local realmKey = GetRealmName()
+local charKey = UnitName("player") .. " - " .. realmKey
 local _, classKey = UnitClass("player")
-classKey = GetPooledString(classKey)
 local _, raceKey = UnitRace("player")
-raceKey = GetPooledString(raceKey)
-local factionKey = GetPooledString(UnitFactionGroup("player"))
-local factionrealmKey = GetPooledString(factionKey .. " - " .. realmKey)
-local localeKey = GetPooledString(GetLocale():lower())
+local factionKey = UnitFactionGroup("player")
+local factionrealmKey = factionKey .. " - " .. realmKey
+local localeKey = GetLocale():lower()
 
 local regionTable = { "US", "KR", "EU", "TW", "CN" }
-local regionKey = GetPooledString(regionTable[GetCurrentRegion()] or GetCurrentRegionName() or "TR")
-local factionrealmregionKey = GetPooledString(factionrealmKey .. " - " .. regionKey)
+local regionKey = regionTable[GetCurrentRegion()] or GetCurrentRegionName() or "TR"
+local factionrealmregionKey = factionrealmKey .. " - " .. regionKey
 
 -- Actual database initialization function
 local function initdb(sv, defaults, defaultProfile, olddb, parent)
@@ -355,7 +377,7 @@ local function initdb(sv, defaults, defaultProfile, olddb, parent)
 	local profileKey
 	if not parent then
 		-- Make a container for profile keys
-		if not sv.profileKeys then sv.profileKeys = {} end
+		if not sv.profileKeys then sv.profileKeys = newTable() end
 
 		-- Try to get the profile selected from the char db
 		profileKey = sv.profileKeys[charKey] or defaultProfile or charKey
@@ -370,20 +392,22 @@ local function initdb(sv, defaults, defaultProfile, olddb, parent)
 		sv.profileKeys = nil
 	end
 
-	-- Pre-allocate key table with all section keys
-    local keyTbl = {
-        ["char"] = charKey,
-        ["realm"] = realmKey,
-        ["class"] = classKey,
-        ["race"] = raceKey,
-        ["faction"] = factionKey,
-        ["factionrealm"] = factionrealmKey,
-        ["factionrealmregion"] = factionrealmregionKey,
-        ["profile"] = profileKey,
-        ["locale"] = localeKey,
-        ["global"] = true,
-        ["profiles"] = true,
-    }
+	-- This table contains keys that enable the dynamic creation
+	-- of each section of the table.  The 'global' and 'profiles'
+	-- have a key of true, since they are handled in a special case
+	local keyTbl= {
+		["char"] = charKey,
+		["realm"] = realmKey,
+		["class"] = classKey,
+		["race"] = raceKey,
+		["faction"] = factionKey,
+		["factionrealm"] = factionrealmKey,
+		["factionrealmregion"] = factionrealmregionKey,
+		["profile"] = profileKey,
+		["locale"] = localeKey,
+		["global"] = true,
+		["profiles"] = true,
+	}
 
 	validateDefaults(defaults, keyTbl, 1)
 
@@ -393,8 +417,8 @@ local function initdb(sv, defaults, defaultProfile, olddb, parent)
 		for k,v in pairs(olddb) do if not preserve_keys[k] then olddb[k] = nil end end
 	end
 
-	-- Give this database the metatable so it initializes dynamically
-	local db = setmetatable(olddb or {}, dbmt)
+	-- Create a database object
+	local db = setmetatable(olddb or newTable(), dbmt)
 
 	if not rawget(db, "callbacks") then
 		-- try to load CallbackHandler-1.0 if it loaded after our library
@@ -402,13 +426,15 @@ local function initdb(sv, defaults, defaultProfile, olddb, parent)
 		db.callbacks = CallbackHandler and CallbackHandler:New(db) or CallbackDummy
 	end
 
-	-- Copy methods locally into the database object for faster access
+	-- Copy methods locally into the database object, to avoid hitting
+	-- the metatable when calling methods
+
 	if not parent then
-        for name, func in pairs(DBObjectLib) do
-            db[name] = func
-        end
+		for name, func in pairs(DBObjectLib) do
+			db[name] = func
+		end
 	else
-		-- Only add these two methods to namespaces
+		-- hack this one in
 		db.RegisterDefaults = DBObjectLib.RegisterDefaults
 		db.ResetProfile = DBObjectLib.ResetProfile
 	end
@@ -417,7 +443,6 @@ local function initdb(sv, defaults, defaultProfile, olddb, parent)
 	db.profiles = sv.profiles
 	db.keys = keyTbl
 	db.sv = sv
-	--db.sv_name = name
 	db.defaults = defaults
 	db.parent = parent
 
@@ -432,74 +457,40 @@ end
 -- and cleans up empty sections
 local function logoutHandler(frame, event)
 	if event == "PLAYER_LOGOUT" then
-		-- Process all databases with optimized batching for high-memory systems
-		if HIGH_MEMORY_SYSTEM then
-			local allDBs = {}
-			local count = 0
+		for db in pairs(AceDB.db_registry) do
+			db.callbacks:Fire("OnDatabaseShutdown", db)
+			db:RegisterDefaults(nil)
 
-			-- First collect all the databases to process
-			for db in pairs(AceDB.db_registry) do
-				count = count + 1
-				allDBs[count] = db
-			end
-
-			-- Process in batches for better CPU cache efficiency
-			for i = 1, count do
-				local db = allDBs[i]
-				db.callbacks:Fire("OnDatabaseShutdown", db)
-				db:RegisterDefaults(nil)
-
-				-- cleanup sections that are empty without defaults
-				local sv = rawget(db, "sv")
-				-- Ensure db.keys is a table before trying to iterate through it
-				if sv and db.keys and type(db.keys) == "table" then
-					for section in pairs(db.keys) do
-						if rawget(sv, section) then
-							-- global is special, all other sections have sub-entrys
-							-- also don't delete empty profiles on main dbs, only on namespaces
-							if section ~= "global" and (section ~= "profiles" or rawget(db, "parent")) then
-								for key in pairs(sv[section]) do
-									if type(sv[section][key]) == "table" and not next(sv[section][key]) then
-										sv[section][key] = nil
-									end
-								end
-							end
-							if not next(sv[section]) then
-								sv[section] = nil
+			-- cleanup sections that are empty without defaults
+			local sv = rawget(db, "sv")
+			for section in pairs(db.keys) do
+				if rawget(sv, section) then
+					-- global is special, all other sections have sub-entrys
+					-- also don't delete empty profiles on main dbs, only on namespaces
+					if section ~= "global" and (section ~= "profiles" or rawget(db, "parent")) then
+						for key in pairs(sv[section]) do
+							if not next(sv[section][key]) then
+								-- Release empty tables back to the pool
+								local tbl = sv[section][key]
+								sv[section][key] = nil
+								releaseTable(tbl)
 							end
 						end
 					end
-				end
-			end
-		else
-			-- Original implementation for lower memory systems
-			for db in pairs(AceDB.db_registry) do
-				db.callbacks:Fire("OnDatabaseShutdown", db)
-				db:RegisterDefaults(nil)
-
-				-- cleanup sections that are empty without defaults
-				local sv = rawget(db, "sv")
-				-- Ensure db.keys is a table before trying to iterate through it
-				if sv and db.keys and type(db.keys) == "table" then
-					for section in pairs(db.keys) do
-						if rawget(sv, section) then
-							-- global is special, all other sections have sub-entrys
-							-- also don't delete empty profiles on main dbs, only on namespaces
-							if section ~= "global" and (section ~= "profiles" or rawget(db, "parent")) then
-								for key in pairs(sv[section]) do
-									if type(sv[section][key]) == "table" and not next(sv[section][key]) then
-										sv[section][key] = nil
-									end
-								end
-							end
-							if not next(sv[section]) then
-								sv[section] = nil
-							end
-						end
+					if not next(sv[section]) then
+						-- Release the empty section table
+						local tbl = sv[section]
+						sv[section] = nil
+						releaseTable(tbl)
 					end
 				end
 			end
 		end
+
+		-- Clear caches on logout to prevent stale data on reload
+		wipe(profileCache)
+		wipe(namespaceCache)
+		wipe(sectionCache)
 	end
 end
 
@@ -566,13 +557,10 @@ function DBObjectLib:SetProfile(name)
 	end
 
 	self.profile = nil
-
-	-- Cache the profile name for high-memory systems
-	if HIGH_MEMORY_SYSTEM then
-		name = GetPooledString(name)
-	end
-
 	self.keys["profile"] = name
+
+	-- Clear the section cache for this database
+	invalidateCache(tostring(self))
 
 	-- if the storage exists, save the new profile
 	-- this won't exist on namespaces.
@@ -582,15 +570,8 @@ function DBObjectLib:SetProfile(name)
 
 	-- populate to child namespaces
 	if self.children then
-		-- Fast path for high-memory systems with many children
-		if HIGH_MEMORY_SYSTEM and next(self.children) then
-			for _, db in pairs(self.children) do
-				DBObjectLib.SetProfile(db, name)
-			end
-		else
-			for _, db in pairs(self.children) do
-				DBObjectLib.SetProfile(db, name)
-			end
+		for _, db in pairs(self.children) do
+			DBObjectLib.SetProfile(db, name)
 		end
 	end
 
@@ -610,7 +591,7 @@ function DBObjectLib:GetProfiles(tbl)
 	if tbl then
 		for k,v in pairs(tbl) do tbl[k] = nil end
 	else
-		tbl = getTable()
+		tbl = {}
 	end
 
 	local curProfile = self.keys.profile
@@ -652,11 +633,6 @@ function DBObjectLib:DeleteProfile(name, silent)
 		error(("Cannot delete profile %q as it does not exist."):format(name), 2)
 	end
 
-	-- Recycle the table before removing the reference
-	-- Only if it exists and we're deleting a non-active profile
-	if self.profiles[name] and name ~= self.keys.profile then
-		recycleTable(self.profiles[name])
-	end
 	self.profiles[name] = nil
 
 	-- populate to child namespaces
@@ -672,10 +648,6 @@ function DBObjectLib:DeleteProfile(name, silent)
 			if self.children and self.children[nsname] then
 				-- already a mapped namespace
 			elseif data.profiles then
-				-- Recycle the table before removing the reference
-				if data.profiles[name] then
-					recycleTable(data.profiles[name])
-				end
 				data.profiles[name] = nil
 			end
 		end
@@ -694,16 +666,65 @@ function DBObjectLib:DeleteProfile(name, silent)
 	self.callbacks:Fire("OnProfileDeleted", self, name)
 end
 
+--- Copies a named profile into the current profile, overwriting any conflicting
+-- settings.
+-- @param name The name of the profile to be copied into the current profile
+-- @param silent If true, do not raise an error when the profile does not exist
+function DBObjectLib:CopyProfile(name, silent)
+	if type(name) ~= "string" then
+		error(("Usage: AceDBObject:CopyProfile(name): 'name' - string expected, got %q."):format(type(name)), 2)
+	end
+
+	if name == self.keys.profile then
+		error(("Cannot have the same source and destination profiles (%q)."):format(name), 2)
+	end
+
+	if not rawget(self.profiles, name) and not silent then
+		error(("Cannot copy profile %q as it does not exist."):format(name), 2)
+	end
+
+	-- Reset the profile before copying
+	DBObjectLib.ResetProfile(self, nil, true)
+
+	local profile = self.profile
+	local source = self.profiles[name]
+
+	copyTable(source, profile)
+
+	-- populate to child namespaces
+	if self.children then
+		for _, db in pairs(self.children) do
+			DBObjectLib.CopyProfile(db, name, true)
+		end
+	end
+
+	-- copy unloaded namespaces
+	if self.sv.namespaces then
+		for nsname, data in pairs(self.sv.namespaces) do
+			if self.children and self.children[nsname] then
+				-- already a mapped namespace
+			elseif data.profiles then
+				-- reset the current profile
+				data.profiles[self.keys.profile] = {}
+				-- copy data
+				copyTable(data.profiles[name], data.profiles[self.keys.profile])
+			end
+		end
+	end
+
+	-- Callback: OnProfileCopied, database, sourceProfileKey
+	self.callbacks:Fire("OnProfileCopied", self, name)
+end
+
 --- Resets the current profile to the default values (if specified).
 -- @param noChildren if set to true, the reset will not be populated to the child namespaces of this DB object
 -- @param noCallbacks if set to true, won't fire the OnProfileReset callback
 function DBObjectLib:ResetProfile(noChildren, noCallbacks)
 	local profile = self.profile
 
-    -- Efficiently clear the profile table
-    for k in pairs(profile) do
-        profile[k] = nil
-    end
+	for k,v in pairs(profile) do
+		profile[k] = nil
+	end
 
 	local defaults = self.defaults and self.defaults.profile
 	if defaults then
@@ -712,16 +733,9 @@ function DBObjectLib:ResetProfile(noChildren, noCallbacks)
 
 	-- populate to child namespaces
 	if self.children and not noChildren then
-        -- Process child namespaces
-        if HIGH_MEMORY_SYSTEM and next(self.children) then
-            for _, db in pairs(self.children) do
-                DBObjectLib.ResetProfile(db, nil, noCallbacks)
-            end
-        else
-            for _, db in pairs(self.children) do
-                DBObjectLib.ResetProfile(db, nil, noCallbacks)
-            end
-        end
+		for _, db in pairs(self.children) do
+			DBObjectLib.ResetProfile(db, nil, noCallbacks)
+		end
 	end
 
 	-- reset unloaded namespaces
@@ -730,14 +744,6 @@ function DBObjectLib:ResetProfile(noChildren, noCallbacks)
 			if self.children and self.children[nsname] then
 				-- already a mapped namespace
 			elseif data.profiles then
-				-- recycle the old profile table if it exists
-				if data.profiles[self.keys.profile] then
-					-- Make sure we're not recycling the table we're about to use
-					local oldProfile = data.profiles[self.keys.profile]
-					if oldProfile and next(oldProfile) ~= nil then
-						recycleTable(oldProfile)
-					end
-				end
 				-- reset the current profile
 				data.profiles[self.keys.profile] = nil
 			end
@@ -828,68 +834,6 @@ function DBObjectLib:GetNamespace(name, silent)
 	return self.children[name]
 end
 
---- Copies a named profile into the current profile, overwriting any conflicting
--- settings.
--- @param name The name of the profile to be copied into the current profile
--- @param silent If true, do not raise an error when the profile does not exist
-function DBObjectLib:CopyProfile(name, silent)
-	if type(name) ~= "string" then
-		error(("Usage: AceDBObject:CopyProfile(name): 'name' - string expected, got %q."):format(type(name)), 2)
-	end
-
-	if name == self.keys.profile then
-		error(("Cannot have the same source and destination profiles (%q)."):format(name), 2)
-	end
-
-	if not rawget(self.profiles, name) and not silent then
-		error(("Cannot copy profile %q as it does not exist."):format(name), 2)
-	end
-
-	-- Reset the profile before copying
-	DBObjectLib.ResetProfile(self, nil, true)
-
-	local profile = self.profile
-	local source = self.profiles[name]
-
-    -- Copy the profile data, with source existence check
-    if source then
-        copyTable(source, profile)
-    end
-
-	-- populate to child namespaces
-	if self.children then
-        -- Process child namespaces
-        if HIGH_MEMORY_SYSTEM and next(self.children) then
-            for _, db in pairs(self.children) do
-                DBObjectLib.CopyProfile(db, name, true)
-            end
-        else
-            for _, db in pairs(self.children) do
-                DBObjectLib.CopyProfile(db, name, true)
-            end
-        end
-	end
-
-	-- copy unloaded namespaces
-	if self.sv.namespaces then
-		for nsname, data in pairs(self.sv.namespaces) do
-			if self.children and self.children[nsname] then
-				-- already a mapped namespace
-			elseif data.profiles then
-				-- reset the current profile
-				data.profiles[self.keys.profile] = {}
-				-- copy data
-				if data.profiles[name] then
-					copyTable(data.profiles[name], data.profiles[self.keys.profile])
-				end
-			end
-		end
-	end
-
-	-- Callback: OnProfileCopied, database, sourceProfileKey
-	self.callbacks:Fire("OnProfileCopied", self, name)
-end
-
 --[[-------------------------------------------------------------------------
 	AceDB Exposed Methods
 ---------------------------------------------------------------------------]]
@@ -917,7 +861,7 @@ function AceDB:New(tbl, defaults, defaultProfile)
 		local name = tbl
 		tbl = _G[name]
 		if not tbl then
-			tbl = {}
+			tbl = newTable()
 			_G[name] = tbl
 		end
 	end
