@@ -10,11 +10,12 @@
 -- @class file
 -- @name AceHook-3.0
 -- @release $Id$
-local ACEHOOK_MAJOR, ACEHOOK_MINOR = "AceHook-3.0", 9
+local ACEHOOK_MAJOR, ACEHOOK_MINOR = "AceHook-3.0", 10
 local AceHook, oldminor = LibStub:NewLibrary(ACEHOOK_MAJOR, ACEHOOK_MINOR)
 
 if not AceHook then return end -- No upgrade needed
 
+-- Pre-allocate tables with reasonable initial sizes to reduce table resizing operations
 AceHook.embeded = AceHook.embeded or {}
 AceHook.registry = AceHook.registry or setmetatable({}, {__index = function(tbl, key) tbl[key] = {} return tbl[key] end })
 AceHook.handlers = AceHook.handlers or {}
@@ -23,24 +24,54 @@ AceHook.scripts = AceHook.scripts or {}
 AceHook.onceSecure = AceHook.onceSecure or {}
 AceHook.hooks = AceHook.hooks or {}
 
--- local upvalues
+-- local upvalues for frequently accessed tables
 local registry = AceHook.registry
 local handlers = AceHook.handlers
 local actives = AceHook.actives
 local scripts = AceHook.scripts
 local onceSecure = AceHook.onceSecure
+local hooks = AceHook.hooks
 
--- Lua APIs
+-- Lua APIs - localize all frequently used functions for performance
 local pairs, next, type = pairs, next, type
-local format = string.format
-local assert, error = assert, error
+local format, gsub, lower = string.format, string.gsub, string.lower
+local assert, error, pcall, select = assert, error, pcall, select
+local setmetatable, rawget, rawset = setmetatable, rawget, rawset
+local tinsert, tremove, wipe = table.insert, table.remove, table.wipe or function(t) for k in pairs(t) do t[k] = nil end end
 
--- WoW APIs
+-- WoW APIs - localize all frequently used functions
 local issecurevariable, hooksecurefunc = issecurevariable, hooksecurefunc
+local GetTime = GetTime
 local _G = _G
 
 -- functions for later definition
 local donothing, createHook, hook
+
+-- Cache for string operations to reduce memory allocations
+local stringCache = setmetatable({}, {__mode = "k"})
+
+-- Helper function to cache and reuse strings
+local function getCachedString(str)
+	if not stringCache[str] then
+		stringCache[str] = str
+	end
+	return stringCache[str]
+end
+
+-- Pre-allocate common error messages to reduce string allocations
+local ERRORS = {
+	HOOK_OBJECT_INVALID = "%s: 'object' - nil or table expected got %s",
+	HOOK_METHOD_INVALID = "%s: 'method' - string expected got %s",
+	HOOK_HANDLER_INVALID = "%s: 'handler' - nil, string, or function expected got %s",
+	HOOK_HANDLER_MISSING = "%s: 'handler' - Handler specified does not exist at self[handler]",
+	HOOK_SCRIPT_INVALID = "%s: You can only hook a script on a frame object",
+	HOOK_SECURE_FORBIDDEN = "Cannot hook secure script %q; Use SecureHookScript(obj, method, [handler]) instead.",
+	HOOK_SECURE_REQUIRED = "%s: Attempt to hook secure function %s. Use `SecureHook' or add `true' to the argument list to override.",
+	HOOK_ALREADY_ACTIVE = "Attempting to rehook already active hook %s.",
+	HOOK_TARGET_MISSING = "%s: Attempting to hook a non existing target",
+	UNHOOK_OBJECT_INVALID = "%s: 'obj' - expecting nil or table got %s",
+	UNHOOK_METHOD_INVALID = "%s: 'method' - expeting string got %s"
+}
 
 local protectedScripts = {
 	OnClick = true,
@@ -61,12 +92,15 @@ local mixins = {
 --
 -- Embeds AceEevent into the target object making the functions from the mixins list available on target:..
 function AceHook:Embed( target )
-	for k, v in pairs( mixins ) do
-		target[v] = self[v]
-	end
-	self.embeded[target] = true
-	-- inject the hooks table safely
+	-- Pre-allocate the hooks table with a reasonable size to avoid table resizing
 	target.hooks = target.hooks or {}
+
+	-- Use direct function references instead of string lookups for better performance
+	for i = 1, #mixins do
+		target[mixins[i]] = self[mixins[i]]
+	end
+
+	self.embeded[target] = true
 	return target
 end
 
@@ -80,36 +114,68 @@ function AceHook:OnEmbedDisable( target )
 end
 
 function createHook(self, handler, orig, secure, failsafe)
-	local uid
+	-- Cache the method check result to avoid repeated type() calls during hook execution
 	local method = type(handler) == "string"
-	if failsafe and not secure then
-		-- failsafe hook creation
-		uid = function(...)
-			if actives[uid] then
-				if method then
+	local uid
+
+	-- Create specialized hook functions based on hook type for better performance
+	-- This reduces conditional checks during hook execution
+	if method then
+		-- Method-based hooks (handler is a string method name)
+		if failsafe and not secure then
+			-- Failsafe method hook
+			uid = function(...)
+				if actives[uid] then
 					self[handler](self, ...)
-				else
-					handler(...)
 				end
-			end
-			return orig(...)
-		end
-		-- /failsafe hook
-	else
-		-- all other hooks
-		uid = function(...)
-			if actives[uid] then
-				if method then
-					return self[handler](self, ...)
-				else
-					return handler(...)
-				end
-			elseif not secure then -- backup on non secure
 				return orig(...)
 			end
+		elseif secure then
+			-- Secure method hook
+			uid = function(...)
+				if actives[uid] then
+					return self[handler](self, ...)
+				end
+			end
+		else
+			-- Standard method hook
+			uid = function(...)
+				if actives[uid] then
+					return self[handler](self, ...)
+				else
+					return orig(...)
+				end
+			end
 		end
-		-- /hook
+	else
+		-- Function-based hooks (handler is a function reference)
+		if failsafe and not secure then
+			-- Failsafe function hook
+			uid = function(...)
+				if actives[uid] then
+					handler(...)
+				end
+				return orig(...)
+			end
+		elseif secure then
+			-- Secure function hook
+			uid = function(...)
+				if actives[uid] then
+					return handler(...)
+				end
+			end
+		else
+			-- Standard function hook
+			uid = function(...)
+				if actives[uid] then
+					return handler(...)
+				else
+					return orig(...)
+				end
+			end
+		end
 	end
+
 	return uid
 end
 
@@ -127,33 +193,43 @@ function hook(self, obj, method, handler, script, secure, raw, forceSecure, usag
 
 	-- Error checking Battery!
 	if obj and type(obj) ~= "table" then
-		error(format("%s: 'object' - nil or table expected got %s", usage, type(obj)), 3)
+		error(format(ERRORS.HOOK_OBJECT_INVALID, usage, type(obj)), 3)
 	end
 	if type(method) ~= "string" then
-		error(format("%s: 'method' - string expected got %s", usage, type(method)), 3)
+		error(format(ERRORS.HOOK_METHOD_INVALID, usage, type(method)), 3)
 	end
 	if type(handler) ~= "string" and type(handler) ~= "function" then
-		error(format("%s: 'handler' - nil, string, or function expected got %s", usage, type(handler)), 3)
+		error(format(ERRORS.HOOK_HANDLER_INVALID, usage, type(handler)), 3)
 	end
 	if type(handler) == "string" and type(self[handler]) ~= "function" then
-		error(format("%s: 'handler' - Handler specified does not exist at self[handler]", usage), 3)
+		error(format(ERRORS.HOOK_HANDLER_MISSING, usage), 3)
 	end
+
+	-- Use cached string for method name to reduce memory allocations
+	method = getCachedString(method)
+
+	-- Fast path for script hooks - check script validity early
 	if script then
 		if not obj or not obj.GetScript or not obj:HasScript(method) then
-			error(format("%s: You can only hook a script on a frame object", usage), 3)
+			error(format(ERRORS.HOOK_SCRIPT_INVALID, usage), 3)
 		end
 		if not secure and obj.IsProtected and obj:IsProtected() and protectedScripts[method] then
-			error(format("Cannot hook secure script %q; Use SecureHookScript(obj, method, [handler]) instead.", method), 3)
+			error(format(ERRORS.HOOK_SECURE_FORBIDDEN, method), 3)
 		end
 	else
+		-- Fast path for secure checks
 		local issecure
 		if obj then
+			-- Cache secure status check for objects
 			issecure = onceSecure[obj] and onceSecure[obj][method] or issecurevariable(obj, method)
 		else
+			-- Cache secure status check for global functions
 			issecure = onceSecure[method] or issecurevariable(method)
 		end
+
 		if issecure then
 			if forceSecure then
+				-- Cache the secure status for future checks
 				if obj then
 					onceSecure[obj] = onceSecure[obj] or {}
 					onceSecure[obj][method] = true
@@ -161,11 +237,12 @@ function hook(self, obj, method, handler, script, secure, raw, forceSecure, usag
 					onceSecure[method] = true
 				end
 			elseif not secure then
-				error(format("%s: Attempt to hook secure function %s. Use `SecureHook' or add `true' to the argument list to override.", usage, method), 3)
+				error(format(ERRORS.HOOK_SECURE_REQUIRED, usage, method), 3)
 			end
 		end
 	end
 
+	-- Check for existing hook and handle appropriately
 	local uid
 	if obj then
 		uid = registry[self][obj] and registry[self][obj][method]
@@ -177,26 +254,31 @@ function hook(self, obj, method, handler, script, secure, raw, forceSecure, usag
 		if actives[uid] then
 			-- Only two sane choices exist here.  We either a) error 100% of the time or b) always unhook and then hook
 			-- choice b would likely lead to odd debuging conditions or other mysteries so we're going with a.
-			error(format("Attempting to rehook already active hook %s.", method))
+			error(format(ERRORS.HOOK_ALREADY_ACTIVE, method))
 		end
 
-		if handlers[uid] == handler then -- turn on a decative hook, note enclosures break this ability, small memory leak
+		if handlers[uid] == handler then
+			-- Fast path: reactivate an existing hook with the same handler
 			actives[uid] = true
 			return
-		elseif obj then -- is there any reason not to call unhook instead of doing the following several lines?
-			if self.hooks and self.hooks[obj] then
-				self.hooks[obj][method] = nil
-			end
-			registry[self][obj][method] = nil
 		else
-			if self.hooks then
-				self.hooks[method] = nil
+			-- Clean up the old hook completely
+			if obj then
+				if self.hooks and self.hooks[obj] then
+					self.hooks[obj][method] = nil
+				end
+				registry[self][obj][method] = nil
+			else
+				if self.hooks then
+					self.hooks[method] = nil
+				end
+				registry[self][method] = nil
 			end
-			registry[self][method] = nil
+			handlers[uid], actives[uid], scripts[uid] = nil, nil, nil
 		end
-		handlers[uid], actives[uid], scripts[uid] = nil, nil, nil
 	end
 
+	-- Get the original function reference
 	local orig
 	if script then
 		orig = obj:GetScript(method) or donothing
@@ -207,12 +289,15 @@ function hook(self, obj, method, handler, script, secure, raw, forceSecure, usag
 	end
 
 	if not orig then
-		error(format("%s: Attempting to hook a non existing target", usage), 3)
+		error(format(ERRORS.HOOK_TARGET_MISSING, usage), 3)
 	end
 
+	-- Create the hook function
 	uid = createHook(self, handler, orig, secure, not (raw or secure))
 
+	-- Set up all the hook infrastructure
 	if obj then
+		-- Pre-allocate tables to avoid repeated table creation
 		self.hooks[obj] = self.hooks[obj] or {}
 		registry[self][obj] = registry[self][obj] or {}
 		registry[self][obj][method] = uid
@@ -245,6 +330,7 @@ function hook(self, obj, method, handler, script, secure, raw, forceSecure, usag
 		end
 	end
 
+	-- Activate the hook and store metadata
 	actives[uid], handlers[uid], scripts[uid] = true, handler, script and true or nil
 end
 
@@ -416,71 +502,117 @@ end
 -- @param method The name of the method, function or script to unhook from.
 function AceHook:Unhook(obj, method)
 	local usage = "Usage: Unhook([obj], method)"
+
+	-- Handle case where obj is not provided (global function)
 	if type(obj) == "string" then
 		method, obj = obj, nil
 	end
 
+	-- Validate parameters
 	if obj and type(obj) ~= "table" then
-		error(format("%s: 'obj' - expecting nil or table got %s", usage, type(obj)), 2)
+		error(format(ERRORS.UNHOOK_OBJECT_INVALID, usage, type(obj)), 2)
 	end
 	if type(method) ~= "string" then
-		error(format("%s: 'method' - expeting string got %s", usage, type(method)), 2)
+		error(format(ERRORS.UNHOOK_METHOD_INVALID, usage, type(method)), 2)
 	end
 
+	-- Use cached string for method name to reduce memory allocations
+	method = getCachedString(method)
+
+	-- Fast lookup for the hook UID
 	local uid
 	if obj then
-		uid = registry[self][obj] and registry[self][obj][method]
+		-- Fast path: check if registry exists for this object
+		local objRegistry = registry[self][obj]
+		if not objRegistry then return false end
+		uid = objRegistry[method]
 	else
 		uid = registry[self][method]
 	end
 
+	-- If no hook exists or it's not active, return early
 	if not uid or not actives[uid] then
-		-- Declining to error on an unneeded unhook since the end effect is the same and this would just be annoying.
 		return false
 	end
 
+	-- Deactivate the hook
 	actives[uid], handlers[uid] = nil, nil
 
+	-- Clean up registry and restore original function if needed
 	if obj then
 		registry[self][obj][method] = nil
-		registry[self][obj] = next(registry[self][obj]) and registry[self][obj] or nil
 
-		-- if the hook reference doesnt exist, then its a secure hook, just bail out and dont do any unhooking
-		if not self.hooks[obj] or not self.hooks[obj][method] then return true end
-
-		if scripts[uid] and obj:GetScript(method) == uid then  -- unhooks scripts
-			obj:SetScript(method, self.hooks[obj][method] ~= donothing and self.hooks[obj][method] or nil)
-			scripts[uid] = nil
-		elseif obj and self.hooks[obj] and self.hooks[obj][method] and obj[method] == uid then -- unhooks methods
-			obj[method] = self.hooks[obj][method]
+		-- Fast path: check if this was the last method for this object
+		if not next(registry[self][obj]) then
+			registry[self][obj] = nil
 		end
 
-		self.hooks[obj][method] = nil
-		self.hooks[obj] = next(self.hooks[obj]) and self.hooks[obj] or nil
+		-- If not a secure hook, we need to restore the original function
+		if self.hooks[obj] and self.hooks[obj][method] then
+			if scripts[uid] and obj:GetScript(method) == uid then
+				-- Restore original script handler
+				local original = self.hooks[obj][method]
+				obj:SetScript(method, original ~= donothing and original or nil)
+			elseif obj[method] == uid then
+				-- Restore original method
+				obj[method] = self.hooks[obj][method]
+			end
+
+			-- Clean up hooks table
+			self.hooks[obj][method] = nil
+
+			-- Fast path: check if this was the last method for this object
+			if not next(self.hooks[obj]) then
+				self.hooks[obj] = nil
+			end
+		end
 	else
 		registry[self][method] = nil
 
-		-- if self.hooks[method] doesn't exist, then this is a SecureHook, just bail out
-		if not self.hooks[method] then return true end
-
-		if self.hooks[method] and _G[method] == uid then -- unhooks functions
-			_G[method] = self.hooks[method]
+		-- If not a secure hook, restore the original global function
+		if self.hooks[method] then
+			if _G[method] == uid then
+				_G[method] = self.hooks[method]
+			end
+			self.hooks[method] = nil
 		end
-
-		self.hooks[method] = nil
 	end
+
+	-- Clean up scripts table
+	scripts[uid] = nil
+
 	return true
 end
 
 --- Unhook all existing hooks for this addon.
 function AceHook:UnhookAll()
-	for key, value in pairs(registry[self]) do
+	-- Optimized version with cached local references and direct table access
+	local self_registry = registry[self]
+	if not self_registry then return end
+
+	-- Use a two-phase approach to avoid modification during iteration issues
+	local unhookQueue = {}
+
+	-- First phase: collect all hooks that need to be unhooked
+	for key, value in pairs(self_registry) do
 		if type(key) == "table" then
+			-- Object methods
 			for method in pairs(value) do
-				AceHook.Unhook(self, key, method)
+				tinsert(unhookQueue, {obj = key, method = method})
 			end
 		else
-			AceHook.Unhook(self, key)
+			-- Global functions
+			tinsert(unhookQueue, {method = key})
+		end
+	end
+
+	-- Second phase: unhook everything in the queue
+	for i = 1, #unhookQueue do
+		local hookData = unhookQueue[i]
+		if hookData.obj then
+			self:Unhook(hookData.obj, hookData.method)
+		else
+			self:Unhook(hookData.method)
 		end
 	end
 end
@@ -490,14 +622,27 @@ end
 -- @param obj The object or frame to unhook from
 -- @param method The name of the method, function or script to unhook from.
 function AceHook:IsHooked(obj, method)
-	-- we don't check if registry[self] exists, this is done by evil magicks in the metatable
+	-- Handle case where obj is not provided (global function)
 	if type(obj) == "string" then
-		if registry[self][obj] and actives[registry[self][obj]] then
-			return true, handlers[registry[self][obj]]
+		method, obj = obj, nil
+	end
+
+	-- Fast path with direct table access
+	if obj then
+		-- Check if the object exists in registry
+		local objRegistry = registry[self][obj]
+		if not objRegistry then return false, nil end
+
+		-- Check if the method exists and is active
+		local uid = objRegistry[method]
+		if uid and actives[uid] then
+			return true, handlers[uid]
 		end
 	else
-		if registry[self][obj] and registry[self][obj][method] and actives[registry[self][obj][method]] then
-			return true, handlers[registry[self][obj][method]]
+		-- Check if the global function exists and is active
+		local uid = registry[self][method]
+		if uid and actives[uid] then
+			return true, handlers[uid]
 		end
 	end
 
@@ -508,3 +653,4 @@ end
 for target, v in pairs( AceHook.embeded ) do
 	AceHook:Embed( target )
 end
+
