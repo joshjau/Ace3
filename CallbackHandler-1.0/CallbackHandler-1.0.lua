@@ -64,7 +64,7 @@ function CallbackHandler.New(_self, target, RegisterName, UnregisterName, Unregi
 					-- fire OnUsed callback?
 					if first and registry.OnUsed then
 						registry.OnUsed(registry, target, event)
-						first = nil
+						first = false
 					end
 				end
 			end
