@@ -1,5 +1,5 @@
 --[[ $Id: CallbackHandler-1.0.lua 25 2022-12-12 15:02:36Z nevcairiel $ ]]
-local MAJOR, MINOR = "CallbackHandler-1.0", 8
+local MAJOR, MINOR = "CallbackHandler-1.0", 9
 local CallbackHandler = LibStub:NewLibrary(MAJOR, MINOR)
 
 if not CallbackHandler then return end -- No upgrade needed
@@ -10,15 +10,74 @@ local meta = {__index = function(tbl, key) tbl[key] = {} return tbl[key] end}
 local securecallfunction, error = securecallfunction, error
 local setmetatable, rawget = setmetatable, rawget
 local next, select, pairs, type, tostring = next, select, pairs, type, tostring
+local tinsert, tremove, sort, wipe = table.insert, table.remove, table.sort, table.wipe
+local GetTime = GetTime
 
+-- Performance cache
+local funcCache = setmetatable({}, {__mode = "k"}) -- weak table to avoid memory leaks
 
-local function Dispatch(handlers, ...)
+local function GetCachedFunction(method, self, arg)
+	local key = (self or "nil") .. "_" .. tostring(method) .. "_" .. tostring(arg or "nil")
+	if not funcCache[key] then
+		if arg ~= nil then
+			if type(method) == "string" then
+				funcCache[key] = function(...) self[method](self, arg, ...) end
+			else
+				funcCache[key] = function(...) method(arg, ...) end
+			end
+		else
+			if type(method) == "string" then
+				funcCache[key] = function(...) self[method](self, ...) end
+			else
+				funcCache[key] = method
+			end
+		end
+	end
+	return funcCache[key]
+end
+
+-- Fast dispatch without error protection (for performance critical scenarios)
+local function FastDispatch(handlers, ...)
+	for _, method in pairs(handlers) do
+		method(...)
+	end
+end
+
+-- Original safe dispatch with error protection
+local function SafeDispatch(handlers, ...)
 	local index, method = next(handlers)
 	if not method then return end
 	repeat
 		securecallfunction(method, ...)
 		index, method = next(handlers, index)
 	until not method
+end
+
+-- Priority dispatch - handlers with higher priority are called first
+local function PriorityDispatch(handlers, priorities, ...)
+	if not priorities then return SafeDispatch(handlers, ...) end
+	
+	-- Sort handlers by priority (higher numbers first)
+	local ordered = {}
+	for obj, method in pairs(handlers) do
+		tinsert(ordered, {obj = obj, method = method, priority = priorities[obj] or 0})
+	end
+	
+	sort(ordered, function(a, b) return a.priority > b.priority end)
+	
+	-- Execute in priority order
+	for i = 1, #ordered do
+		securecallfunction(ordered[i].method, ...)
+	end
+end
+
+-- Throttled dispatch - limits how often a particular event can fire
+local function ThrottledDispatch(handlers, eventname, throttle, lastFired, ...)
+	local now = GetTime()
+	if not lastFired[eventname] or (now - lastFired[eventname] >= throttle) then
+		lastFired[eventname] = now
+		return SafeDispatch(handlers, eventname, ...)
+	end
 end
 
 --------------------------------------------------------------------------
@@ -43,7 +102,64 @@ function CallbackHandler.New(_self, target, RegisterName, UnregisterName, Unregi
 
 	-- Create the registry object
 	local events = setmetatable({}, meta)
-	local registry = { recurse=0, events=events }
+	local registry = { 
+		recurse = 0, 
+		events = events,
+		priorities = {},           -- Store callback priorities
+		throttle = {},             -- Store throttle intervals for events
+		lastFired = {},            -- Track when events were last fired
+		dispatchMode = "SAFE",     -- Default dispatch mode (SAFE, FAST, PRIORITY, THROTTLED)
+		profiling = false,         -- Performance profiling
+		profileData = {}           -- Store profiling information
+	}
+
+	-- Performance settings
+	function registry:SetDispatchMode(mode)
+		if mode == "SAFE" or mode == "FAST" or mode == "PRIORITY" or mode == "THROTTLED" then
+			self.dispatchMode = mode
+			return true
+		end
+		return false
+	end
+	
+	-- Enable or disable performance profiling
+	function registry:SetProfiling(enabled)
+		self.profiling = enabled and true or false
+		if not enabled then
+			wipe(self.profileData)
+		end
+		return self.profiling
+	end
+	
+	-- Get profiling data
+	function registry:GetProfileData()
+		return self.profileData
+	end
+	
+	-- Set throttle interval for an event
+	function registry:SetThrottle(eventname, interval)
+		if type(eventname) ~= "string" then
+			error("Usage: SetThrottle(eventname, interval): 'eventname' - string expected.", 2)
+		end
+		if type(interval) ~= "number" or interval < 0 then
+			error("Usage: SetThrottle(eventname, interval): 'interval' - non-negative number expected.", 2)
+		end
+		
+		self.throttle[eventname] = interval
+		return true
+	end
+	
+	-- Set priority for a callback
+	function registry:SetPriority(eventname, object, priority)
+		if not eventname or not object then return false end
+		
+		if not self.priorities[eventname] then
+			self.priorities[eventname] = {}
+		end
+		
+		self.priorities[eventname][object] = priority
+		return true
+	end
 
 	-- registry:Fire() - fires the given event/message into the registry
 	function registry:Fire(eventname, ...)
@@ -51,7 +167,32 @@ function CallbackHandler.New(_self, target, RegisterName, UnregisterName, Unregi
 		local oldrecurse = registry.recurse
 		registry.recurse = oldrecurse + 1
 
-		Dispatch(events[eventname], eventname, ...)
+		local start
+		if self.profiling then
+			start = GetTime()
+		end
+
+		-- Choose dispatch method based on settings
+		if self.dispatchMode == "FAST" then
+			FastDispatch(events[eventname], eventname, ...)
+		elseif self.dispatchMode == "PRIORITY" and self.priorities[eventname] then
+			PriorityDispatch(events[eventname], self.priorities[eventname], eventname, ...)
+		elseif self.dispatchMode == "THROTTLED" and self.throttle[eventname] then
+			ThrottledDispatch(events[eventname], eventname, self.throttle[eventname], self.lastFired, ...)
+		else
+			SafeDispatch(events[eventname], eventname, ...)
+		end
+
+		-- Record profiling data if enabled
+		if self.profiling then
+			local elapsed = GetTime() - start
+			if not self.profileData[eventname] then
+				self.profileData[eventname] = {count = 0, totalTime = 0, maxTime = 0}
+			end
+			self.profileData[eventname].count = self.profileData[eventname].count + 1
+			self.profileData[eventname].totalTime = self.profileData[eventname].totalTime + elapsed
+			self.profileData[eventname].maxTime = max(self.profileData[eventname].maxTime, elapsed)
+		end
 
 		registry.recurse = oldrecurse
 
@@ -64,7 +205,7 @@ function CallbackHandler.New(_self, target, RegisterName, UnregisterName, Unregi
 					-- fire OnUsed callback?
 					if first and registry.OnUsed then
 						registry.OnUsed(registry, target, event)
-						first = nil
+						first = false
 					end
 				end
 			end
@@ -104,9 +245,9 @@ function CallbackHandler.New(_self, target, RegisterName, UnregisterName, Unregi
 
 			if select("#",...)>=1 then	-- this is not the same as testing for arg==nil!
 				local arg=select(1,...)
-				regfunc = function(...) self[method](self,arg,...) end
+				regfunc = GetCachedFunction(method, self, arg)
 			else
-				regfunc = function(...) self[method](self,...) end
+				regfunc = GetCachedFunction(method, self)
 			end
 		else
 			-- function ref with self=object or self="addonId" or self=thread
@@ -116,7 +257,7 @@ function CallbackHandler.New(_self, target, RegisterName, UnregisterName, Unregi
 
 			if select("#",...)>=1 then	-- this is not the same as testing for arg==nil!
 				local arg=select(1,...)
-				regfunc = function(...) method(arg,...) end
+				regfunc = GetCachedFunction(method, nil, arg)
 			else
 				regfunc = method
 			end
@@ -139,6 +280,12 @@ function CallbackHandler.New(_self, target, RegisterName, UnregisterName, Unregi
 		end
 	end
 
+	-- Register with priority
+	target.RegisterCallbackWithPriority = function(self, eventname, method, priority, ...)
+		target[RegisterName](self, eventname, method, ...)
+		registry:SetPriority(eventname, self, priority or 0)
+	end
+
 	-- Unregister a callback
 	target[UnregisterName] = function(self, eventname)
 		if not self or self==target then
@@ -149,6 +296,10 @@ function CallbackHandler.New(_self, target, RegisterName, UnregisterName, Unregi
 		end
 		if rawget(events, eventname) and events[eventname][self] then
 			events[eventname][self] = nil
+			-- Remove priority if it exists
+			if registry.priorities[eventname] then
+				registry.priorities[eventname][self] = nil
+			end
 			-- Fire OnUnused callback?
 			if registry.OnUnused and not next(events[eventname]) then
 				registry.OnUnused(registry, target, eventname)
@@ -182,6 +333,10 @@ function CallbackHandler.New(_self, target, RegisterName, UnregisterName, Unregi
 				for eventname, callbacks in pairs(events) do
 					if callbacks[self] then
 						callbacks[self] = nil
+						-- Remove priority if it exists
+						if registry.priorities[eventname] then
+							registry.priorities[eventname][self] = nil
+						end
 						-- Fire OnUnused callback?
 						if registry.OnUnused and not next(callbacks) then
 							registry.OnUnused(registry, target, eventname)
@@ -190,6 +345,11 @@ function CallbackHandler.New(_self, target, RegisterName, UnregisterName, Unregi
 				end
 			end
 		end
+	end
+
+	-- Expose the registry object to allow direct manipulation
+	target.GetCallbackRegistry = function()
+		return registry
 	end
 
 	return registry
