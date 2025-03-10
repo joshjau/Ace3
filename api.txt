@@ -1,0 +1,5421 @@
+--[[
+CombatLogGetCurrentEventInfo API Reference
+Documentation updated for WoW 11.0.7 (The War Within)
+]]
+
+--[[
+====================================================================
+DEPRECATED AND REMOVED APIS
+This section contains APIs that have been deprecated or removed.
+Reference the newer alternatives mentioned with each entry.
+====================================================================
+]]
+
+--[[
+====================================================================
+GetSpellInfo (Deprecated)
+Returns spell information from spellbook or spell ID
+Introduced: Patch 2.4.0 (Vanilla)/1.13.2 (Classic)
+Deprecated: Patch 11.0.0 (The War Within) - Replaced by C_Spell.GetSpellInfo
+====================================================================
+]]
+
+--[[
+Deprecation Notes:
+- Replaced by C_Spell.GetSpellInfo which returns structured table
+- Will be removed in a future patch
+- Spellbook index version removed in TWW
+- Migrate to C_Spell.GetSpellInfo for future compatibility
+]]
+
+--[[
+Migration Guide:
+-- Legacy code
+local name, _, icon = GetSpellInfo(133) -- Fireball
+
+-- Modern equivalent
+local spellData = C_Spell.GetSpellInfo(133)
+if spellData then
+    local name = spellData.name
+    local icon = spellData.iconID
+end
+]]
+
+--[[
+====================================================================
+GetSpellCooldown (Deprecated)
+Returns cooldown information for a spell
+Introduced: Patch 1.0.0 (Vanilla)/1.13.2 (Classic)
+Deprecated: Patch 11.0.0 (The War Within) - Replaced by C_Spell.GetSpellCooldown
+====================================================================
+]]
+
+--[[
+Deprecation Notes:
+- Replaced by C_Spell.GetSpellCooldown which returns structured table
+- Legacy function remains available but returns less detailed data
+- Migrate to C_Spell.GetSpellCooldown for future compatibility
+]]
+
+--[[
+Migration Guide:
+-- Legacy code
+local start, duration, enabled = GetSpellCooldown(133) -- Fireball
+
+-- Modern equivalent
+local cooldownInfo = C_Spell.GetSpellCooldown(133)
+if cooldownInfo then
+    local start = cooldownInfo.startTime
+    local duration = cooldownInfo.duration
+    local enabled = cooldownInfo.isEnabled
+end
+]]
+
+--[[
+====================================================================
+GetMouseFocus (Deprecated)
+Returns the frame currently under the mouse cursor
+Introduced: Patch 1.0 (Vanilla)
+Deprecated: Patch 11.0.0 (The War Within) - Replaced by GetMouseFoci
+====================================================================
+]]
+
+--[[
+Deprecation Notes:
+- Replaced by GetMouseFoci which returns multiple frames
+- Will be removed in a future patch
+- Use ScriptRegion:IsMouseMotionFocus() for motion event checks
+- Migrate to GetMouseFoci for future compatibility
+]]
+
+--[[
+Migration Guide:
+-- Legacy code
+local frame = GetMouseFocus()
+
+-- Modern equivalent
+local topFrame = select(1, GetMouseFoci())
+-- Or for checking specific frame:
+if frame:IsMouseMotionFocus() then
+    -- Handle mouse focus
+end
+]]
+
+--[[
+====================================================================
+HasPetSpells (Deprecated)
+Returns information about pet spellbook
+Introduced: Patch 1.0 (Vanilla)
+Deprecated: Patch 11.0.0 (The War Within) - Replaced by C_SpellBook.HasPetSpells
+====================================================================
+]]
+
+--[[
+Deprecation Notes:
+- Replaced by C_SpellBook.HasPetSpells
+- Will be removed in a future patch
+- Returns more detailed information in new API
+- Migrate to C_SpellBook.HasPetSpells for future compatibility
+]]
+
+--[[
+Migration Guide:
+-- Legacy code
+local hasSpells, petType = HasPetSpells()
+
+-- Modern equivalent
+local numSpells, petType = C_SpellBook.HasPetSpells()
+if numSpells then
+    -- Handle pet spells
+end
+]]
+
+--[[
+====================================================================
+GetSpellLossOfControlCooldown (Legacy)
+Returns information about a loss-of-control cooldown affecting a spell
+Introduced: Patch 5.2.0 (Mists of Pandaria)
+====================================================================
+]]
+
+--[[
+Deprecation Notes:
+- Superseded by C_Spell.GetSpellLossOfControlCooldown
+- Will be removed in a future patch
+- Migrate to C_Spell.GetSpellLossOfControlCooldown for future compatibility
+]]
+
+--[[
+Migration Guide:
+-- Legacy code
+local start, duration = GetSpellLossOfControlCooldown(spellID)
+
+-- Modern equivalent
+local start, duration = C_Spell.GetSpellLossOfControlCooldown(spellID)
+]]
+
+--[[
+====================================================================
+DoesSpellExist (Legacy)
+Returns whether a spell exists in the player's spellbook
+Introduced: Patch 8.0.1 (Battle for Azeroth)
+====================================================================
+]]
+
+--[[
+Deprecation Notes:
+- Different functionality from C_Spell.DoesSpellExist
+- C_Spell.DoesSpellExist checks game database, not player's spellbook
+- Consider using C_Spell.DoesSpellExist with IsSpellKnown for modern implementations
+]]
+
+--[[
+Migration Guide:
+-- Legacy code (checks if player knows spell)
+local knows = DoesSpellExist("Flash Heal")
+
+-- Modern equivalent (checks if spell exists in game)
+local exists = C_Spell.DoesSpellExist(2061)
+local known = exists and IsSpellKnown(2061)
+]]
+
+--[[
+====================================================================
+CombatLog_GetCurrentEventInfo (Deprecated)
+Former combat log event parser
+Deprecated: Patch 8.0 (Battle for Azeroth) - Replaced by CombatLogGetCurrentEventInfo
+====================================================================
+]]
+
+--[[
+Deprecation Notes:
+- Replaced by CombatLogGetCurrentEventInfo in BFA (8.0)
+- No longer functional in current client
+- Migrate to CombatLogGetCurrentEventInfo for all combat log parsing
+]]
+
+--[[
+====================================================================
+CURRENT APIS
+The following APIs are current and supported in The War Within (11.0)
+====================================================================
+]]
+
+--[[
+====================================================================
+CombatLogGetCurrentEventInfo
+Returns current combat log event data with variable return values
+Introduced: Patch 8.0 (Battle for Azeroth)
+Last Changed: Patch 9.0 (Shadowlands) - Added environmental type tracking
+====================================================================
+]]
+
+--[[
+Version History:
+- 8.0.1 (2018-07-17): Initial implementation
+- 8.1.0 (2018-12-11): Added isOffHand parameter for melee events
+- 9.0.1 (2020-10-13): Added environmental damage type differentiation
+- 10.0.0 (2022-10-25): Dragonflight - No structural changes
+- 11.0.0 (2024-08-26): The War Within - Current implementation
+]]
+
+--[[
+Base Parameters (indices 1-11):
+1.  timestamp         (number)  - Time of event (GetTime() format)
+2.  eventType         (string)  - Full event type (e.g., "SPELL_DAMAGE")
+3.  hideCaster        (boolean) - Whether source is hidden
+4.  sourceGUID        (string)  - Full GUID of source entity
+5.  sourceName        (string)  - Name of source unit
+6.  sourceFlags       (number)  - Unit flags for source (bitmask)
+7.  sourceRaidFlags   (number)  - Raid target index for source
+8.  destGUID          (string)  - Full GUID of destination entity
+9.  destName          (string)  - Name of destination unit
+10. destFlags         (number)  - Unit flags for destination (bitmask)
+11. destRaidFlags     (number)  - Raid target index for destination
+
+Extra Parameters (indices 12+ - event-specific):
+12. spellId           (number)  - Spell ID for spell-related events
+13. spellName         (string)  - Localized spell name
+14. spellSchool       (number)  - Spell school bitmask
+15. amount            (number)  - Damage/healing amount
+16. overkill          (number)  - Excess damage beyond target's health
+17. school            (number)  - Damage school bitmask
+18. resisted          (number)  - Amount resisted
+19. blocked           (number)  - Amount blocked
+20. absorbed          (number)  - Amount absorbed
+21. critical          (boolean) - Whether hit was critical
+22. glancing          (boolean) - Whether hit was glancing
+23. crushing          (boolean) - Whether hit was crushing (Legacy mechanic, removed in BFA)
+24. isOffHand         (boolean) - For melee/swing events
+]]
+
+--[[
+Common Event Subtypes and Parameter Mapping:
+• SPELL_DAMAGE:       12-22 (spellId, ..., critical)
+• SWING_DAMAGE:       12-20 (amount, ..., critical)
+• SPELL_HEAL:         12-16 (spellId, ..., absorbed, critical)
+• SPELL_AURA_APPLIED: 12-14 (spellId, auraType, amount)
+• ENVIRONMENTAL_DAMAGE: 12-18 (environmentalType, ..., critical)
+]]
+
+--[[
+Usage Example:
+local function OnCombatEvent()
+    local timestamp, eventType, _, 
+          sourceGUID, sourceName, _, _, 
+          destGUID, destName = CombatLogGetCurrentEventInfo()
+    
+    if eventType == "SPELL_DAMAGE" then
+        local spellId, _, _, amount, _, _, critical = select(12, CombatLogGetCurrentEventInfo())
+        -- Process damage event
+    end
+end
+]]
+
+--[[
+Best Practices:
+1. Always check eventType before accessing extra parameters
+2. Use UnitGUID("player") for player comparison instead of name
+3. Prefer spell IDs over names for spell identification
+4. Use bit.band() with sourceFlags/destFlags for unit type checks
+]]
+
+--[[
+Error Handling:
+- Returns nil values for invalid parameter indices
+- Extra parameters vary by event type (verify with subevent)
+- Unit names may be nil for hidden/unknown entities
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_CombatLogGetCurrentEventInfo
+• In-game FrameXML/CombatLog.lua
+]]
+
+--[[
+====================================================================
+GetTime
+Returns system uptime in seconds with millisecond precision
+Introduced: Patch 1.0.0 (Vanilla)
+Last Changed: Patch 4.3.0 (Cataclysm) - Update frequency changed
+====================================================================
+]]
+
+--[[
+Version History:
+- 1.0.0 (2004-11-23): Initial implementation
+- 4.3.0 (2011-11-29): Changed to update once per rendered frame
+- 7.1.0 (2016-10-25): Added GetTimePreciseSec() alternative
+- 10.0.0 (2022-10-25): Dragonflight - No structural changes
+- 11.0.0 (2024-08-26): The War Within - Current implementation
+]]
+
+--[[
+Notes:
+- Consider GetTimePreciseSec() for microsecond precision
+- debugprofilestop() available for high-frequency timing (CPU cycles)
+- Original implementation unchanged since Cataclysm changes
+]]
+
+--[[
+Best Practices:
+1. Use for general timing needs (>16ms precision)
+2. Prefer GetTimePreciseSec() for animation/combat logging
+3. Values are frame-bound - identical across consecutive frames at high FPS
+4. Not affected by game pause/alt-tab (measures real system uptime)
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_GetTime
+• In-game FrameXML/GlobalAPI.lua
+]]
+
+--[[
+Related Functions:
+- GetTimePreciseSec()  - Microsecond precision (Patch 7.1+)
+- debugprofilestop()   - CPU cycle counter for microbenchmarks
+- time()               - Lua standard function (second precision)
+]]
+
+--[[
+====================================================================
+GetTimePreciseSec
+Returns high-precision monotonic timestamp in seconds
+Introduced: Patch 7.3.0 (Legion)
+Last Changed: Patch 9.0 (Shadowlands) - Behavior stabilized
+====================================================================
+]]
+
+--[[
+Version History:
+- 7.3.0 (2017-08-29): Initial implementation
+- 8.0.1 (2018-07-17): Fixed macOS/Linux timing source
+- 9.0.1 (2020-10-13): Guaranteed monotonic behavior
+- 11.0.0 (2024-08-26): The War Within - Current implementation
+]]
+
+--[[
+Parameters: None
+
+Returns:
+seconds (number) - Monotonic timestamp in seconds with µs precision
+]]
+
+--[[
+Key Features:
+1. Monotonic (never decreases)
+2. Microsecond resolution (actual precision varies by hardware)
+3. Not affected by system clock changes
+4. First call initializes counter (returns 0.0 until first frame render)
+]]
+
+--[[
+Best Practices:
+1. Use for combat logging/ability timing
+2. Initialize early to avoid initial 0.0 value
+3. Compare deltas rather than absolute values
+4. Combine with C_Timer.NewTicker for precision loops
+5. Avoid excessive calls (>1000/sec may impact performance)
+]]
+
+--[[
+Example:
+local start = GetTimePreciseSec()
+PerformCombatAction()
+local duration = GetTimePreciseSec() - start
+print(string.format("Action took %.3f ms", duration * 1000))
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_GetTimePreciseSec
+• In-game FrameXML/GlobalAPI.lua
+]]
+
+--[[
+====================================================================
+C_Spell.GetSpellInfo
+Returns structured spell information by spell identifier
+Introduced: Patch 11.0.0 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+spellIdentifier (number|string) - Spell ID, name, name(subtext), or link
+
+Returns:
+spellInfo (table) - Structured spell data or nil if not found
+  .name           (string)  - Localized spell name
+  .iconID         (number)  - Current display icon (fileID)
+  .originalIconID (number)  - Base spell icon (unaffected by overrides)
+  .castTime       (number)  - Cast duration in milliseconds (0=instant)
+  .minRange       (number)  - Minimum range requirement (0=no minimum)
+  .maxRange       (number)  - Maximum effective range (0=unlimited)
+  .spellID        (number)  - Spell ID of queried spell
+]]
+
+--[[
+Best Practices:
+1. Prefer spell IDs over names for reliability
+2. Check nil returns before accessing fields
+3. Use SpellMixin:ContinueOnSpellLoad() for async data loading
+4. Cache results for frequently accessed spells
+5. Use originalIconID for talent-modified spell tracking
+]]
+
+--[[
+Example:
+local spellData = C_Spell.GetSpellInfo(2061) -- Flash Heal
+if spellData then
+    print(string.format("%s (ID %d) Range: %d yards", 
+          spellData.name, spellData.spellID, spellData.maxRange))
+end
+]]
+
+--[[
+Asynchronous Usage:
+local spell = Spell:CreateFromSpellID(139)
+spell:ContinueOnSpellLoad(function()
+    local data = C_Spell.GetSpellInfo(139)
+    -- Safe to use data here
+end)
+]]
+
+--[[
+Version Notes:
+- 11.0.0 (2024-07-23): Initial implementation
+- 11.0.5 (2024-09-10): Added proper nil handling for invalid identifiers
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_C_Spell.GetSpellInfo
+• In-game FrameXML/Blizzard_APIDocumentationGenerated.lua
+]]
+
+--[[
+====================================================================
+C_Spell.GetDeadlyDebuffInfo
+Returns critical debuff tracking data for priority target management
+Introduced: Patch 11.0.5 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+spellIdentifier (number|string) - SpellID, name, or hyperlink
+
+Returns:
+deadlyDebuffInfo (DeadlyDebuffInfo?) - Structured debuff data or nil if not found
+  .criticalTimeRemainingMs (number?) - Milliseconds until critical phase
+  .criticalStacks         (number?) - Required stacks for critical state
+  .priority               (number)  - Tracking priority (1=highest)
+  .warningText           (string)  - UI warning text for critical state
+  .soundKitID            (number?) - Sound effect ID for critical alert
+]]
+
+--[[
+Version History:
+- 11.0.5 (2024-09-10): Initial implementation
+]]
+
+--[[
+Best Practices:
+1. Check for nil returns before accessing fields
+2. Use priority field for multi-debuff tracking order
+3. Handle nil criticalTimeRemainingMs/criticalStacks for non-critical debuffs
+4. Consider soundKitID for audio feedback (may be nil)
+5. Cache results for frequently checked debuffs
+6. Use with UNIT_AURA events for real-time updates
+]]
+
+--[[
+Example:
+local debuffInfo = C_Spell.GetDeadlyDebuffInfo(33786) -- Cyclone
+if debuffInfo then
+    if debuffInfo.criticalTimeRemainingMs then
+        print(string.format("%s: Critical in %.1fs (Priority %d)",
+              debuffInfo.warningText,
+              debuffInfo.criticalTimeRemainingMs/1000,
+              debuffInfo.priority))
+        
+        if debuffInfo.soundKitID then
+            PlaySound(debuffInfo.soundKitID)
+        end
+    end
+end
+]]
+
+--[[
+Related Functions:
+- C_SpellBook.GetDeadlyDebuffInfo: Legacy version (10.0.0)
+- C_UnitAuras.GetAuraDataBySpellID: Get current aura state
+- UNIT_AURA event: Track debuff changes
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_C_Spell.GetDeadlyDebuffInfo
+• In-game FrameXML/Blizzard_APIDocumentationGenerated.lua
+]]
+
+--[[
+====================================================================
+C_Spell.GetSpellCooldown
+Returns structured cooldown information for spells/abilities
+Introduced: Patch 11.0.0 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+spellIdentifier (number|string) - Spell ID, name, name(subtext), or link
+
+Returns:
+spellCooldownInfo (table?) - Cooldown data or nil if invalid spell
+  .startTime  (number)  - Cooldown start timestamp (GetTime() format)
+  .duration   (number)  - Total cooldown duration in seconds
+  .isEnabled  (boolean) - True if cooldown is actively counting down
+  .modRate    (number)  - Haste/modifier rate for cooldown UI updates
+]]
+
+--[[
+Best Practices:
+1. Use spell ID 61304 to check Global Cooldown (GCD)
+2. Check isEnabled to detect "hidden" cooldowns (e.g., after spell cancel)
+3. Combine with GetTime() for remaining time calculation:
+   local remaining = (startTime + duration) - GetTime()
+4. Handle nil returns for invalid/unavailable spells
+5. Use modRate with GetInventoryItemCooldown for gear-based CDs
+]]
+
+--[[
+Example - GCD Check:
+local gcdCD = C_Spell.GetSpellCooldown(61304)
+if gcdCD and gcdCD.duration > 0 then
+    local gcdRemaining = gcdCD.startTime + gcdCD.duration - GetTime()
+    print("GCD remaining:", gcdRemaining)
+end
+]]
+
+--[[
+Version History:
+- 11.0.0 (2024-07-23): Initial implementation
+- 11.0.5 (2024-09-10): Added modRate support for dynamic UI updates
+]]
+
+--[[
+Related Events:
+- SPELL_UPDATE_COOLDOWN: Triggered when cooldown state changes
+- UNIT_SPELLCAST_SUCCEEDED: Note: Cooldown starts BEFORE this event
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_C_Spell.GetSpellCooldown
+• In-game FrameXML/Blizzard_APIDocumentationGenerated.lua
+]]
+
+--[[
+====================================================================
+C_SpellBook.GetSpellBookItemCooldown
+Returns cooldown info for spellbook entries (TWW replacement)
+Introduced: Patch 11.0.0 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+spellBookItemSlotIndex (number) - Spellbook slot index (1-based)
+spellBookItemSpellBank (Enum.SpellBookSpellBank) - Player (0) or Pet (1)
+
+Returns:
+spellCooldownInfo (table?) - Cooldown data or nil if invalid entry
+  .startTime  (number)  - Cooldown start (0 if inactive)
+  .duration   (number)  - Total duration in seconds (0 if ready)
+  .isEnabled  (boolean) - True if actively counting down
+  .modRate    (number)  - Haste modifier for UI updates
+]]
+
+--[[
+Best Practices:
+1. Use with SPELL_UPDATE_COOLDOWN events for real-time tracking
+2. Check isEnabled to detect paused cooldowns (e.g., spell cancellation)
+3. Combine with GetSpellBookItemInfo for slot validation
+4. Use modRate for accurate remaining time calculations:
+   local remaining = (startTime + duration - GetTime()) / modRate
+5. Handle nil returns for invalid/offspec spells
+]]
+
+--[[
+Example - Pet Spell Check:
+local petSpellIndex = 5
+local cooldownInfo = C_SpellBook.GetSpellBookItemCooldown(petSpellIndex, 1)
+if cooldownInfo and cooldownInfo.duration > 0 then
+    local remaining = (cooldownInfo.startTime + cooldownInfo.duration - GetTime()) / cooldownInfo.modRate
+    print("Pet spell cooldown remaining:", remaining)
+end
+]]
+
+--[[
+Version History:
+- 11.0.0 (2024-07-23): Replaced GetSpellCooldown()
+- 11.0.5 (2024-09-10): Added modRate support
+]]
+
+--[[
+Deprecation Notes:
+- Replaces GetSpellCooldown() for spellbook entries
+- Original function remains but uses different parameters
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_C_SpellBook.GetSpellBookItemCooldown
+• In-game FrameXML/Blizzard_APIDocumentationGenerated.lua
+]]
+
+--[[
+====================================================================
+UNIT_SPELLCAST_SUCCEEDED
+Event fired when a spell completes casting successfully
+Introduced: Patch 2.0.1 (Burning Crusade)/1.13.2 (Classic)
+====================================================================
+]]
+
+--[[
+Parameters:
+unitTarget  (string)  - UnitId of casting unit ("player", "target", etc.)
+castGUID    (string)  - Unique identifier for this cast instance
+spellID     (number)  - Numeric spell ID of cast spell
+]]
+
+--[[
+Version History:
+- 2.0.1 (2006-12-05): Initial implementation
+- 4.0.1 (2010-10-12): Added spellID parameter
+- 8.0.1 (2018-07-17): Removed spellName and rank parameters
+- 11.0.0 (2024-08-26): Current TWW implementation
+]]
+
+--[[
+Best Practices:
+1. Use spellID for spell identification (not names)
+2. Track castGUID for multi-stage spell sequencing
+3. Combine with C_Spell.GetSpellCooldown for cooldown management
+4. Handle environmental casts (spellID 0) appropriately
+5. Use UnitGUID(unitTarget) for persistent unit identification
+]]
+
+--[[
+Example:
+local f = CreateFrame("Frame")
+f:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
+f:SetScript("OnEvent", function(_, event, unit, castGUID, spellID)
+    if unit == "player" and spellID == 116 then
+        print("Frostbolt successfully cast!")
+    end
+end)
+]]
+
+--[[
+Related Events:
+- UNIT_SPELLCAST_START: Cast initiation
+- UNIT_SPELLCAST_FAILED: Cast interruption
+- SPELL_UPDATE_COOLDOWN: Cooldown status changes
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/UNIT_SPELLCAST_SUCCEEDED
+• In-game FrameXML/Blizzard_APIDocumentation.lua
+]]
+
+--[[
+====================================================================
+UnitId
+Identifies units by their relationship to the player
+Introduced: Patch 1.0.0 (Vanilla)
+Last Changed: Patch 11.0.5 (The War Within) - Soft target enhancements
+====================================================================
+]]
+
+--[[
+Core Unit Types:
+- "player"          : Current player
+- "target"          : Current target
+- "partyN"          : Party members (1-4)
+- "raidN"           : Raid members (1-40)
+- "arenaN"          : Arena opponents (1-5)
+- "bossN"           : Encounter bosses (1-8)
+- "pet"             : Player's pet
+- "vehicle"         : Player's current vehicle
+]]
+
+--[[
+Soft Targeting (Dragonflight+):
+- "softenemy"       : Auto-targeted hostile unit
+- "softfriend"      : Auto-targeted friendly unit
+- "softinteract"    : Auto-targeted interactable object
+- "anyenemy"        : Current target OR softenemy
+- "anyfriend"       : Current target OR softfriend
+]]
+
+--[[
+Target Chaining:
+Append "target" to any UnitId for target hierarchy:
+- "targettarget"    : Target's target
+- "pettarget"       : Pet's target
+- "party1target"    : First party member's target
+]]
+
+--[[
+Version History:
+- 1.0.0 (2004-11-23): Base unit tokens
+- 2.0.1 (2006-12-05): Added "focus"
+- 3.3.0 (2009-12-08): Added "bossN"
+- 7.0.3 (2016-07-19): Added "nameplateN"
+- 10.0.0 (2022-10-25): Dragonflight soft targeting
+- 11.0.5 (2024-09-10): Enhanced soft target prioritization
+]]
+
+--[[
+Best Practices:
+1. Always validate with UnitExists() before use
+2. Prefer GUIDs (UnitGUID()) for persistent identification
+3. Limit target chaining depth (performance impact)
+4. Use UnitIsUnit() for direct comparisons
+5. Handle "mouseover" carefully - can be nil after frame leave
+]]
+
+--[[
+Example - Raid Target Checking:
+for i = 1, 40 do
+    local unit = "raid"..i
+    if UnitExists(unit) and UnitIsDeadOrGhost(unit) then
+        print(UnitName(unit).." needs resurrection")
+    end
+end
+]]
+
+--[[
+Related Functions:
+- UnitGUID()        : Get persistent unit identifier
+- UnitExists()      : Validate unit existence
+- UnitIsVisible()   : Check client-side visibility
+- UnitIsUnit()      : Compare two unit references
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/UnitId
+• In-game FrameXML/GlobalAPI.lua
+]]
+
+--[[
+====================================================================
+UnitName/UnitFullName/UnitNameUnmodified
+Returns name and realm information for units
+Introduced:
+- UnitName: Patch 1.0.0 (Vanilla)
+- UnitFullName: Patch 5.4.2 (Mists of Pandaria)
+- UnitNameUnmodified: Patch 9.0.2 (Shadowlands)
+====================================================================
+]]
+
+--[[
+Parameters:
+unit (string) - Valid UnitId ("player", "target", etc.)
+
+Returns:
+name (string?)  - Unit name or nil if invalid
+realm (string?) - Normalized realm name or nil if same realm
+]]
+
+--[[
+Version History:
+- 1.0.0 (2004-11-23): UnitName initial implementation
+- 1.12.0 (2006-08-22): Added realm return value
+- 5.4.2 (2013-09-10): UnitFullName introduced
+- 9.0.2 (2020-11-17): UnitNameUnmodified added
+- 11.0.5 (2024-09-10): Current TWW implementation
+]]
+
+--[[
+Function Differences:
+1. UnitName()
+   - Returns realm only for cross-realm units
+   - Affected by name-modifying effects
+
+2. UnitFullName()
+   - Always returns realm for "player" unit
+   - Consistent cross-realm handling
+
+3. UnitNameUnmodified()
+   - Returns base name ignoring temporary modifications
+   - Unaffected by effects like [Lifegiving Seed]
+]]
+
+--[[
+Best Practices:
+1. Use UnitFullName() for player name/realm consistency
+2. Prefer UnitNameUnmodified() for spell/target tracking
+3. Always check nil returns before using names
+4. Use Ambiguate() for cross-realm name formatting
+5. Combine with UnitGUID() for persistent identification
+]]
+
+--[[
+Examples:
+-- Basic name check
+local name, realm = UnitName("target")
+if name then
+    print("Target: "..(realm and name.."-"..realm or name))
+end
+
+-- Player name with realm
+local playerName, playerRealm = UnitFullName("player")
+print("Player: "..playerName.."@"..playerRealm)
+]]
+
+--[[
+GetUnitName Formatting:
+formattedName = GetUnitName(unit, showServerName)
+- showServerName (boolean):
+  true: "Name-Realm" for cross-realm
+  false: "Name (*)" for coalesced realms
+
+Example:
+print(GetUnitName("target", true))  -- "Valnaar-EarthenRing"
+print(GetUnitName("target", false)) -- "Valnaar (*)"
+]]
+
+--[[
+Related Functions:
+- Ambiguate()          : Prevents name collisions
+- UnitGUID()           : Unique persistent identifier
+- GetPlayerInfoByGUID(): Cross-realm player data
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_UnitName
+• In-game FrameXML/GlobalAPI.lua
+]]
+
+--[[
+====================================================================
+C_UnitAuras.GetAuraDataByIndex
+Retrieves detailed aura information by index
+Introduced: Patch 10.0.0 (Dragonflight)
+====================================================================
+]]
+
+--[[
+Parameters:
+unitToken (string) - Unit identifier ("player", "target", etc.)
+index     (number) - 1-based aura index
+filter    (string?) - Filter flags separated by pipes: "HELPFUL|HARMFUL|PLAYER|RAID|CANCELABLE|NOT_CANCELABLE"
+
+Returns:
+auraData (table?) - Structured aura data or nil
+  .auraInstanceID          (number)    - Unique identifier for aura tracking
+  .spellId                 (number)    - Spell ID of the aura
+  .name                    (string)    - Localized aura name
+  .icon                    (number)     - Texture fileID
+  .applications            (number)    - Stack count
+  .dispelName              (string?)   - Dispel type ("Curse", "Magic", etc.)
+  .duration                (number)    - Total duration in seconds
+  .expirationTime          (number)    - GetTime() expiration timestamp
+  .sourceUnit              (string?)   - Unit that applied the aura
+  .isStealable             (boolean)   - If magic effect can be purged
+  .nameplateShowPersonal   (boolean)   - Shows on personal nameplate
+  .isBossAura              (boolean)   - Applied by raid boss
+  .isFromPlayerOrPlayerPet (boolean)   - Applied by player or their pet
+  .timeMod                 (number)    - Haste-modified duration
+]]
+
+--[[
+Version History:
+- 10.0.0 (2022-10-25): Initial implementation
+- 10.2.5 (2024-01-16): Added .auraInstanceID field
+- 11.0.5 (2024-09-10): Added .isFromPlayerOrPlayerPet
+]]
+
+--[[
+Best Practices:
+1. Use with C_UnitAuras.GetAuraSlots for efficient iteration
+2. Prefer over UnitAura for modern addons
+3. Combine with UNIT_AURA event's updateInfo payload
+4. Cache auraInstanceID for tracking individual auras
+]]
+
+--[[
+Example:
+local slots = C_UnitAuras.GetAuraSlots("player", "HELPFUL")
+for _, slot in ipairs(slots) do
+    local aura = C_UnitAuras.GetAuraDataByIndex("player", slot)
+    if aura and aura.spellId == 21562 then
+        print("Fortitude active:", aura.applications)
+    end
+end
+]]
+
+--[[
+====================================================================
+C_UnitAuras.GetAuraSlots
+Returns indexes of auras for efficient iteration
+Introduced: Patch 10.2.5 (Dragonflight)
+====================================================================
+]]
+
+--[[
+Parameters:
+unitToken (string) - Unit identifier
+filter    (string) - "HELPFUL" or "HARMFUL" required
+maxSlots  (number?) - Maximum slots to return (default all)
+continuationToken (number?) - For paginated requests
+
+Returns:
+continuationToken (number?) - Next index to query if maxSlots reached
+... (number) - Array of aura slot indexes
+]]
+
+--[[
+====================================================================
+UNIT_AURA Event
+Fired when auras change on a unit
+Updated: Patch 10.0.0 (Dragonflight)
+====================================================================
+]]
+
+--[[
+Payload:
+unitToken (string) - Affected unit
+updateInfo (table?) - Detailed change information:
+  .addedAuras             (AuraData[]) - Newly applied auras
+  .updatedAuraInstanceIDs (number[])   - Modified aura IDs  
+  .removedAuraInstanceIDs (number[])   - Removed aura IDs
+  .isFullUpdate           (boolean)    - Requires complete refresh
+]]
+
+--[[
+Best Practices:
+1. Use AuraUtil.ShouldSkipAuraUpdate with updateInfo for optimization
+2. Track auraInstanceIDs instead of spell IDs for multi-instance auras
+3. Combine with C_UnitAuras.GetAuraDataByAuraInstanceID
+]]
+
+--[[
+Example Event Handler:
+frame:RegisterEvent("UNIT_AURA")
+frame:SetScript("OnEvent", function(_, event, unit, info)
+    if info.isFullUpdate then
+        -- Refresh all auras
+    else
+        for _, id in ipairs(info.removedAuraInstanceIDs) do
+            -- Remove tracked aura
+        end
+    end
+end)
+]]
+
+--[[
+====================================================================
+C_UnitAuras.GetBuffDataByIndex
+Alias for GetAuraDataByIndex with "HELPFUL" filter
+C_UnitAuras.GetDebuffDataByIndex
+Alias for GetAuraDataByIndex with "HARMFUL" filter
+====================================================================
+]]
+
+--[[
+Migration Guide:
+- Replace UnitAuraSlots with C_UnitAuras.GetAuraSlots
+- Replace UnitAura/UnitBuff/UnitDebuff with GetAuraDataByIndex
+- Use auraInstanceID instead of indexes for tracking
+- Prefer UNIT_AURA's updateInfo over full scans
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_C_UnitAuras.GetAuraDataByIndex
+• https://warcraft.wiki.gg/wiki/UNIT_AURA
+• In-game FrameXML/Blizzard_APIDocumentationGenerated.lua
+]]
+
+--[[
+====================================================================
+C_Spell.DoesSpellExist
+Checks if a spell exists in the game database
+Introduced: Patch 8.0.1 (Battle for Azeroth)
+====================================================================
+]]
+
+--[[
+Parameters:
+spellID (number) - Numeric spell identifier
+
+Returns:
+exists (boolean) - True if the spell exists in game data
+]]
+
+--[[
+Version History:
+- 8.0.1 (2018-07-17): Initial implementation
+- 11.0.5 (2024-09-10): Added proper error handling for invalid IDs
+]]
+
+--[[
+Details:
+• Verifies spell existence in game database
+• Does not indicate if spell is known/learnable
+• Returns false for invalid/non-existent spell IDs
+• Useful for validating spell IDs before accessing spell data
+• More efficient than attempting to get spell info directly
+]]
+
+--[[
+Best Practices:
+1. Use before attempting to access spell data with other functions
+2. Cache results for frequently checked spells
+3. Note that existence doesn't mean spell is known/usable
+4. Combine with IsSpellKnown() to check if player has learned the spell
+5. Use before C_Spell.GetSpellInfo() to avoid unnecessary calls
+]]
+
+--[[
+Example:
+local spellID = 133 -- Fireball
+if C_Spell.DoesSpellExist(spellID) then
+    local spellData = C_Spell.GetSpellInfo(spellID)
+    if spellData then
+        print("Spell exists:", spellData.name)
+    end
+end
+]]
+
+--[[
+Related Functions:
+- C_Spell.GetSpellInfo: Get detailed spell information
+- C_Spell.IsSpellDataCached: Check data availability
+- IsSpellKnown: Check if spell is learned
+- DoesSpellExist: Legacy version (different functionality)
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_C_Spell.DoesSpellExist
+• In-game FrameXML/Blizzard_APIDocumentationGenerated.lua
+]]
+
+--[[
+====================================================================
+C_Spell.GetOverrideSpell
+Returns the ID for the override spell (useful for talent-modified abilities)
+Introduced: Patch 11.0.5 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+spellIdentifier (number|string) - SpellID, name, or hyperlink
+spec (number?) = 0 - Which Class Specialization to consider, defaults to player's current Spec
+onlyKnown (boolean?) = true - Whether to only consider known spells
+ignoreOverrideSpellID (number?) = 0 - Specific override ID to ignore
+
+Returns:
+overrideSpellID (number) - Returns the spellID for the active version of the spell
+]]
+
+--[[
+Best Practices:
+1. Use to find active version of spells that can be overridden by talents
+2. Check for nil returns when spell has no override
+3. Consider spec parameter for multi-spec override checks
+4. Cache results when checking frequently used spells
+5. Handle cases where override may change with talent changes
+]]
+
+--[[
+Example - Rotation Usage:
+-- Check if Backstab is overridden by Gloomblade
+local backstabID = 53 -- Backstab
+local overrideID = C_Spell.GetOverrideSpell(backstabID)
+if overrideID and overrideID ~= backstabID then
+    -- Use override spell in rotation
+    return overrideID
+end
+return backstabID
+]]
+
+--[[
+====================================================================
+C_Spell.GetSpellAutoCast
+Returns autocast information for a spell
+Introduced: Patch 11.0.5 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+spellIdentifier (number|string) - SpellID, name, or hyperlink
+
+Returns:
+autoCastAllowed (boolean) - Whether the spell can be set to autocast
+autoCastEnabled (boolean) - Whether autocast is currently enabled
+]]
+
+--[[
+Version History:
+- 11.0.5 (2024-09-10): Initial implementation
+]]
+
+--[[
+Best Practices:
+1. Check for nil returns if spell is not found
+2. Use with pet spells and abilities that support autocast
+3. Combine with SPELL_UPDATE_USABLE for state changes
+4. Cache results for frequently checked spells
+5. Handle cases where autocast state may change
+]]
+
+--[[
+Example:
+-- Check autocast state of a pet spell
+local spellID = 3110 -- Firebolt (Imp)
+local allowed, enabled = C_Spell.GetSpellAutoCast(spellID)
+if allowed then
+    print("Autocast " .. (enabled and "enabled" or "disabled"))
+end
+]]
+
+--[[
+Related Functions:
+- C_Spell.DoesSpellExist: Verify spell exists
+- C_Spell.GetSpellInfo: Get spell details
+- ToggleSpellAutocast: Change autocast state
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_C_Spell.GetSpellAutoCast
+• In-game FrameXML/Blizzard_APIDocumentationGenerated.lua
+]]
+
+--[[
+====================================================================
+C_Spell.GetSpellPowerCost
+Returns resource cost information for a spell (critical for rotation logic)
+Introduced: Patch 11.0.5 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+spellIdentifier (number|string) - SpellID, name, or hyperlink
+
+Returns:
+powerCosts (SpellPowerCostInfo[]?) - Array of power cost info tables or nil
+  .type            (Enum.PowerType) - Power type (MANA, FOCUS, etc.)
+  .name            (string)         - Power token name (ex: "MANA", "FOCUS")
+  .cost            (number)         - Total cost including optional cost
+  .minCost         (number)         - Minimum required cost to cast
+  .costPercent     (number)         - Cost as percentage of max resource
+  .costPerSec      (number)         - Cost per second for channeled spells
+  .requiredAuraID  (number)         - Aura required for cost to apply
+  .hasRequiredAura (boolean)        - Whether required aura is active
+]]
+
+--[[
+Best Practices:
+1. Check for nil returns if spell is not found
+2. Handle multiple power types (spells can cost multiple resources)
+3. Consider costPercent for percentage-based costs
+4. Use minCost for checking cast requirements
+5. Handle channeled spells with costPerSec values
+6. Verify requiredAura conditions when present
+]]
+
+--[[
+Example - Resource Management:
+local function CanCastSpell(spellID)
+    local costs = C_Spell.GetSpellPowerCost(spellID)
+    if not costs then return false end
+    
+    for _, costInfo in ipairs(costs) do
+        local currentPower = UnitPower("player", costInfo.type)
+        if currentPower < costInfo.minCost then
+            return false
+        end
+    end
+    return true
+end
+]]
+
+--[[
+====================================================================
+C_Spell.GetSpellLossOfControlCooldown
+Returns cooldown information for loss of control effects (PvP focus)
+Introduced: Patch 11.0.5 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+spellIdentifier (number|string) - SpellID, name, or hyperlink
+
+Returns:
+startTime (number) - Cooldown start timestamp (GetTime() format)
+duration (number) - Total cooldown duration in seconds
+]]
+
+--[[
+Best Practices:
+1. Use with crowd control and loss of control abilities
+2. Combine with GetTime() for remaining time calculation
+3. Handle cases where cooldown may be modified by talents/effects
+4. Consider using with LOSS_OF_CONTROL_UPDATE event
+5. Important for PvP rotation decision making
+]]
+
+--[[
+Example - DR Tracking:
+local function GetDRRemaining(spellID)
+    local start, duration = C_Spell.GetSpellLossOfControlCooldown(spellID)
+    if start and duration > 0 then
+        return start + duration - GetTime()
+    end
+    return 0
+end
+]]
+
+--[[
+====================================================================
+C_Spell.GetSpellName
+Returns the localized name of a spell
+Introduced: Patch 11.0.5 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+spellIdentifier (number|string) - SpellID, name, or hyperlink
+
+Returns:
+name (string?) - Localized spell name or nil if spell not found
+]]
+
+--[[
+Version History:
+- 11.0.5 (2024-09-10): Initial implementation
+]]
+
+--[[
+Best Practices:
+1. Check for nil returns if spell is not found
+2. Prefer spell IDs over names for reliability
+3. Cache results for frequently accessed spells
+4. Use with C_Spell.DoesSpellExist for validation
+5. Consider using C_Spell.GetSpellInfo for additional data
+]]
+
+--[[
+Example:
+local spellID = 133 -- Fireball
+local name = C_Spell.GetSpellName(spellID)
+if name then
+    print("Spell name:", name)
+end
+]]
+
+--[[
+Details:
+• Returns only the name component of spell data
+• More efficient than GetSpellInfo when only name is needed
+• Returns nil for invalid or non-existent spells
+• Returns localized name in client's current language
+]]
+
+--[[
+Related Functions:
+- C_Spell.DoesSpellExist: Verify spell exists
+- C_Spell.GetSpellInfo: Get full spell details
+- GetSpellLink: Get clickable spell link
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_C_Spell.GetSpellName
+• In-game FrameXML/Blizzard_APIDocumentationGenerated.lua
+]]
+
+--[[
+====================================================================
+C_Spell.GetSpellLossOfControlCooldown
+Returns cooldown information for loss of control effects
+Introduced: Patch 11.0.5 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+spellIdentifier (number|string) - SpellID, name, or hyperlink
+
+Returns:
+startTime (number) - Cooldown start timestamp (GetTime() format)
+duration (number) - Total cooldown duration in seconds
+]]
+
+--[[
+Version History:
+- 11.0.5 (2024-09-10): Initial implementation
+]]
+
+--[[
+Best Practices:
+1. Check for nil returns if spell is not found
+2. Use with crowd control and loss of control abilities
+3. Combine with GetTime() for remaining time calculation:
+   local remaining = (startTime + duration) - GetTime()
+4. Handle cases where cooldown may be modified by talents/effects
+5. Consider using with LOSS_OF_CONTROL_UPDATE event
+]]
+
+--[[
+Example:
+-- Check Fear's loss of control cooldown
+local spellID = 5782 -- Fear
+local start, duration = C_Spell.GetSpellLossOfControlCooldown(spellID)
+if start and duration > 0 then
+    local remaining = start + duration - GetTime()
+    print(string.format("Loss of control immunity: %.1f seconds", remaining))
+end
+]]
+
+--[[
+Details:
+• Used for tracking diminishing returns and immunity periods
+• Returns cooldown for loss of control categories
+• Separate from regular spell cooldowns
+• Important for PvP crowd control management
+]]
+
+--[[
+Related Functions:
+- C_Spell.GetSpellCooldown: Get regular spell cooldown
+- C_LossOfControl.GetActiveLossOfControlData: Current LoC effects
+- LOSS_OF_CONTROL_UPDATE event: Track LoC state changes
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_C_Spell.GetSpellLossOfControlCooldown
+• In-game FrameXML/Blizzard_APIDocumentationGenerated.lua
+]]
+
+--[[
+====================================================================
+GetSpellLossOfControlCooldown (Legacy)
+Returns information about a loss-of-control cooldown affecting a spell
+Introduced: Patch 5.2.0 (Mists of Pandaria)
+====================================================================
+]]
+
+--[[
+Parameters:
+spellSlot (number) - Spell book slot index, ascending from 1
+bookType (string) - Spell book type token, e.g. "spell" from player's spell book
+OR
+spellName (string) - Name of a spell in the player's spell book
+OR
+spellID (number) - Spell ID of a spell accessible to the player
+
+Returns:
+start    (number) - Time at which the loss-of-control cooldown began (GetTime format)
+duration (number) - Duration of the loss-of-control cooldown in seconds; 0 if not affected
+]]
+
+--[[
+Version History:
+- 5.2.0 (2013-03-05): Initial implementation
+- 11.0.5 (2024-09-10): Superseded by C_Spell.GetSpellLossOfControlCooldown
+]]
+
+--[[
+Details:
+• Returns 0, 0 if the spell is not affected by a loss-of-control cooldown
+• Used for tracking diminishing returns and immunity periods
+• Separate from regular spell cooldowns
+• Important for PvP crowd control management
+]]
+
+--[[
+Best Practices:
+1. Prefer spell IDs over names/slot indices for reliability
+2. Use with crowd control abilities to track DR timers
+3. Handle nil returns for invalid spell identifiers
+4. Consider migrating to C_Spell.GetSpellLossOfControlCooldown
+5. Combine with GetTime() for remaining time calculation
+]]
+
+--[[
+Example:
+-- Check Fear's DR timer (legacy method)
+local start, duration = GetSpellLossOfControlCooldown(5782)
+if duration > 0 then
+    local remaining = start + duration - GetTime()
+    print(string.format("DR immunity: %.1f seconds", remaining))
+end
+]]
+
+--[[
+Migration Guide:
+-- Legacy code
+local start, duration = GetSpellLossOfControlCooldown(spellID)
+
+-- Modern equivalent
+local start, duration = C_Spell.GetSpellLossOfControlCooldown(spellID)
+]]
+
+--[[
+Related Functions:
+- GetActionLossOfControlCooldown: Action bar variant
+- C_Spell.GetSpellLossOfControlCooldown: Modern replacement
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_GetSpellLossOfControlCooldown
+• In-game FrameXML/GlobalAPI.lua
+]]
+
+--[[
+====================================================================
+C_SpellBook.GetSpellBookItemLossOfControlCooldown
+Returns loss of control cooldown info for spellbook entries
+Introduced: Patch 11.0.0 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+spellBookItemSlotIndex (number) - Spellbook slot index (1-based)
+spellBookItemSpellBank (Enum.SpellBookSpellBank) - Player (0) or Pet (1)
+
+Returns:
+startTime (number) - Time when the LoC cooldown began (GetTime format), or nil if invalid
+duration (number) - Total duration in seconds, or nil if invalid
+]]
+
+--[[
+Version History:
+- 11.0.0 (2024-07-23): Initial implementation
+- 11.0.5 (2024-09-10): Added proper error handling for invalid slots
+]]
+
+--[[
+Details:
+• Returns nil if item doesn't exist
+• Returns nil for items that don't display cooldowns (future/offspec spells)
+• Separate from regular spell cooldowns
+• Used for tracking diminishing returns and immunity periods
+]]
+
+--[[
+Best Practices:
+1. Verify slot index is valid before calling
+2. Handle nil returns for invalid slot/bank combinations
+3. Use with SPELL_UPDATE_COOLDOWN event for real-time tracking
+4. Consider using C_Spell.GetSpellLossOfControlCooldown for direct spell ID access
+5. Handle cases where item doesn't display cooldowns (future/offspec spells)
+]]
+
+--[[
+Example:
+-- Check first pet spell's LoC cooldown
+local start, duration = C_SpellBook.GetSpellBookItemLossOfControlCooldown(1, Enum.SpellBookSpellBank.Pet)
+if start and duration > 0 then
+    local remaining = start + duration - GetTime()
+    print(string.format("Pet ability DR: %.1f seconds", remaining))
+end
+]]
+
+--[[
+SpellBookSpellBank Enum:
+0 (Player) - Player's spellbook
+1 (Pet)    - Pet's spellbook
+]]
+
+--[[
+Related Functions:
+- C_Spell.GetSpellLossOfControlCooldown: Direct spell ID version
+- C_SpellBook.GetSpellBookItemInfo: Get spell info for slot
+- SPELL_UPDATE_COOLDOWN event: Track cooldown changes
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_C_SpellBook.GetSpellBookItemLossOfControlCooldown
+• In-game FrameXML/Blizzard_APIDocumentationGenerated.lua
+]]
+
+--[[
+====================================================================
+C_Spell.GetSpellLink
+Returns a formatted hyperlink for a spell
+Introduced: Patch 11.0.5 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+spellIdentifier (number|string) - SpellID, name, or hyperlink
+glyphID (number?) - Optional glyph identifier
+
+Returns:
+link (string?) - Formatted spell link (e.g., "|cff71d5ff|Hspell:2061:0|h[Flash Heal]|h|r") or nil if spell not found
+]]
+
+--[[
+Version History:
+- 11.0.5 (2024-09-10): Initial implementation
+]]
+
+--[[
+Details:
+• Returns a clickable spell link for use in chat and UI elements
+• Link format: |cff71d5ff|Hspell:spellID:glyphID|h[Spell Name]|h|r
+• Color code (71d5ff) indicates spell link type
+• Returns nil for invalid spell identifiers
+• glyphID parameter typically used for modified versions of spells
+]]
+
+--[[
+Best Practices:
+1. Prefer spell IDs over names for reliability
+2. Check nil returns for invalid spells
+3. Cache results for frequently used spells
+4. Use with C_Spell.DoesSpellExist for validation
+5. Handle cases where spell data is not loaded
+6. Consider escaping links when used in UI elements
+]]
+
+--[[
+Example:
+-- Create clickable Fireball link
+local spellID = 133 -- Fireball
+local link = C_Spell.GetSpellLink(spellID)
+if link then
+    print("Click to view spell:", link)
+end
+
+-- Create link with glyph modification
+local glyphLink = C_Spell.GetSpellLink(spellID, 1234)
+]]
+
+--[[
+Related Functions:
+- C_Spell.DoesSpellExist: Verify spell exists
+- C_Spell.GetSpellInfo: Get spell details
+- GetSpellLink: Legacy version
+- C_SpellBook.GetSpellLinkFromSpellID: SpellID-specific version
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_C_Spell.GetSpellLink
+• In-game FrameXML/Blizzard_APIDocumentationGenerated.lua
+]]
+
+--[[
+====================================================================
+C_SpellBook.GetSpellBookItemLink
+Returns a hyperlink for a spellbook entry
+Introduced: Patch 11.0.0 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+spellBookItemSlotIndex (number) - Spellbook slot index (1-based)
+spellBookItemSpellBank (Enum.SpellBookSpellBank) - Player (0) or Pet (1)
+glyphID (number?) - Optional glyph identifier
+
+Returns:
+link (string?) - Formatted spell link (e.g., "|cff71d5ff|Hspell:2061:0|h[Flash Heal]|h|r") or nil if slot invalid
+]]
+
+--[[
+Version History:
+- 11.0.0 (2024-07-23): Initial implementation
+- 11.0.5 (2024-09-10): Added proper error handling for invalid slots
+]]
+
+--[[
+SpellBookSpellBank Enum:
+Enum.SpellBookSpellBank = {
+    Player = 0,  -- Replaces "spell" / BOOKTYPE_SPELL
+    Pet    = 1  -- Replaces "pet" / BOOKTYPE_PET
+}
+]]
+
+--[[
+Details:
+• Returns a clickable spell link for use in chat and UI elements
+• Link format: |cff71d5ff|Hspell:spellID:glyphID|h[Spell Name]|h|r
+• Color code (71d5ff) indicates spell link type
+• Returns nil for invalid slot/bank combinations
+• glyphID parameter typically used for modified versions of spells
+]]
+
+--[[
+Best Practices:
+1. Verify slot index is valid before calling
+2. Handle cases where slot contains no spell
+3. Use with GetSpellBookItemInfo for slot validation
+4. Consider using C_Spell.GetSpellLink for direct spell ID access
+5. Handle nil returns for invalid slot/bank combinations
+6. Consider escaping links when used in UI elements
+]]
+
+--[[
+Example:
+-- Get link for first player spell
+local link = C_SpellBook.GetSpellBookItemLink(1, Enum.SpellBookSpellBank.Player)
+if link then
+    print("Player ability:", link)
+end
+
+-- Get link for first pet spell with glyph
+local petLink = C_SpellBook.GetSpellBookItemLink(1, Enum.SpellBookSpellBank.Pet, 1234)
+if petLink then
+    print("Pet ability with glyph:", petLink)
+end
+]]
+
+--[[
+Related Functions:
+- C_Spell.GetSpellLink: Direct spell ID version
+- C_SpellBook.GetSpellBookItemInfo: Get spell info for slot
+- C_SpellBook.GetSpellLinkFromSpellID: SpellID-specific version
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_C_SpellBook.GetSpellBookItemLink
+• In-game FrameXML/Blizzard_APIDocumentationGenerated.lua
+]]
+
+--[[
+====================================================================
+C_SpellBook.GetSpellLinkFromSpellID
+Returns a hyperlink for a spell by ID
+Introduced: Patch 9.1.0 (Chains of Domination)
+====================================================================
+]]
+
+--[[
+Parameters:
+spellID (number) - Numeric spell identifier
+glyphID (number?) - Optional glyph identifier for modified versions
+
+Returns:
+spellLink (string?) - Formatted spell link (e.g., "|cff71d5ff|Hspell:2061:0|h[Flash Heal]|h|r") or nil if spell not found
+]]
+
+--[[
+Version History:
+- 9.1.0 (2021-06-29): Initial implementation
+- 10.1.0 (2023-05-02): Added glyphID parameter
+- 11.0.5 (2024-09-10): Added proper nil handling for invalid spells
+]]
+
+--[[
+Details:
+• Returns a clickable spell link for use in chat and UI elements
+• Link format: |cff71d5ff|Hspell:spellID:glyphID|h[Spell Name]|h|r
+• Color code (71d5ff) indicates spell link type
+• Returns nil for invalid spell IDs
+• glyphID parameter typically used for modified versions of spells
+]]
+
+--[[
+Best Practices:
+1. Check nil returns for invalid spell IDs
+2. Consider using C_Spell.GetSpellLink for newer code (11.0.5+)
+3. Cache results for frequently accessed spells
+4. Handle cases where spell data is not loaded
+5. Use with C_Spell.DoesSpellExist for validation
+6. Consider escaping links when used in UI elements
+]]
+
+--[[
+Example:
+-- Create basic spell link
+local spellID = 2061 -- Flash Heal
+local link = C_SpellBook.GetSpellLinkFromSpellID(spellID)
+if link then
+    print("Click to view spell:", link)
+end
+
+-- Create link with glyph modification
+local glyphLink = C_SpellBook.GetSpellLinkFromSpellID(spellID, 1234)
+]]
+
+--[[
+Related Functions:
+- C_Spell.GetSpellLink: Modern replacement (11.0.5+)
+- C_SpellBook.GetSpellBookItemLink: Spellbook slot version
+- GetSpellLink: Legacy version
+]]
+
+--[[
+====================================================================
+DoesSpellExist
+Returns whether a spell exists in the player's spellbook
+Introduced: Patch 8.0.1 (Battle for Azeroth)
+====================================================================
+]]
+
+--[[
+Parameters:
+spellName (string) - Name of the spell to check
+
+Returns:
+spellExists (boolean) - True if the spell exists in the player's spellbook
+]]
+
+--[[
+Version History:
+- 8.0.1 (2018-07-17): Initial implementation
+]]
+
+--[[
+Details:
+• Checks if a spell exists in the player's spellbook by name
+• Different from C_Spell.DoesSpellExist which checks game database
+• Only works with spells the player character knows
+• Case sensitive for spell names
+• Returns false for unknown spells
+]]
+
+--[[
+Best Practices:
+1. Use C_Spell.DoesSpellExist for modern implementations
+2. Handle case sensitivity in spell names
+3. Consider that spell may exist but not be known to player
+4. Cache results for frequently checked spells
+5. Be aware this only checks player's known spells
+]]
+
+--[[
+Example:
+local spellName = "Flash Heal"
+if DoesSpellExist(spellName) then
+    print("Player knows spell:", spellName)
+end
+]]
+
+--[[
+Migration Guide:
+-- Legacy code (checks if player knows spell)
+local knows = DoesSpellExist("Flash Heal")
+
+-- Modern equivalent (checks if spell exists in game)
+local exists = C_Spell.DoesSpellExist(2061)
+local known = exists and IsSpellKnown(2061)
+]]
+
+--[[
+Related Functions:
+- C_Spell.DoesSpellExist: Check spell existence in game database
+- IsSpellKnown: Check if player has learned a spell
+- GetSpellInfo: Get detailed spell information
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_DoesSpellExist
+• In-game FrameXML/GlobalAPI.lua
+]]
+
+--[[
+====================================================================
+C_Spell.GetSpellLevelLearned
+Returns the level at which a spell is learned
+Introduced: Patch 11.0.0 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+spellIdentifier (number|string) - SpellID, name, or hyperlink
+
+Returns:
+levelLearned (number?) - Level at which the spell is learned, or nil if spell not found
+                        Returns 0 for spells learned through talents/specialization
+]]
+
+--[[
+Version History:
+- 11.0.0 (2024-07-23): Initial implementation
+- 11.0.5 (2024-09-10): Added proper error handling for invalid spells
+]]
+
+--[[
+Details:
+• Returns the level at which a spell becomes available to learn
+• May return a different value if player is Level Linked with another player
+• Returns nil for invalid spell identifiers
+• Returns 0 for spells learned through talents or specialization choices
+• Useful for spell availability checks and UI tooltips
+• Considers current specialization and talent choices
+• Accounts for level scaling in timewalking/party sync scenarios
+]]
+
+--[[
+Best Practices:
+1. Check for nil returns with invalid spell identifiers
+2. Cache results for frequently checked spells
+3. Consider Level Link state when using returned values
+4. Use with C_Spell.DoesSpellExist for validation
+5. Handle cases where spell level may vary by spec/talents
+6. Check for 0 return value for talent/spec-based abilities
+7. Consider level scaling in timewalking content
+]]
+
+--[[
+Example:
+local spellID = 2061 -- Flash Heal
+local level = C_Spell.GetSpellLevelLearned(spellID)
+if level then
+    print(string.format("Spell learned at level %d", level))
+    
+    -- Check if player can learn
+    local playerLevel = UnitLevel("player")
+    if level == 0 then
+        print("Learned through talents/specialization")
+    elseif playerLevel >= level then
+        print("Available to learn")
+    else
+        print(string.format("Need %d more levels", level - playerLevel))
+    end
+end
+]]
+
+--[[
+Related Functions:
+- C_SpellBook.GetSpellBookItemLevelLearned: Spellbook slot version
+- IsSpellKnown: Check if spell is already learned
+- UnitLevel: Get current unit level
+- C_PlayerInfo.GetScalingLevel: Get scaled level for content
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_C_Spell.GetSpellLevelLearned
+• In-game FrameXML/Blizzard_APIDocumentationGenerated.lua
+]]
+
+--[[
+====================================================================
+C_Spell.GetSpellIDForSpellIdentifier
+Returns the numeric spell ID for a given spell identifier
+Introduced: Patch 11.0.0 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+spellIdentifier (number|string) - SpellID, name, name(subtext), or link; If passed a spell ID, will return same id as was passed
+
+Returns:
+spellID (number?) - Numeric spell ID or nil if spell not found
+]]
+
+--[[
+Version History:
+- 11.0.0 (2024-07-23): Initial implementation
+- 11.0.5 (2024-09-10): Added proper error handling for invalid identifiers
+]]
+
+--[[
+Details:
+• Primary purpose is converting spell names/links to their numeric IDs
+• Returns nil for non-existent spells
+• Returns input ID if passed a numeric spell ID
+• Useful for standardizing spell identification in addons
+• More efficient than parsing spell links manually
+]]
+
+--[[
+Best Practices:
+1. Cache results for frequently accessed spells
+2. Prefer passing spell IDs directly when already known
+3. Handle nil returns for invalid identifiers
+4. Use before accessing other spell APIs that require numeric IDs
+5. Consider using with C_Spell.DoesSpellExist for validation
+]]
+
+--[[
+Example:
+-- Get spell ID from name
+local spellName = "Flash Heal"
+local spellID = C_Spell.GetSpellIDForSpellIdentifier(spellName)
+if spellID then
+    print(string.format("%s has ID: %d", spellName, spellID))
+end
+
+-- Get spell ID from link
+local spellLink = "|cff71d5ff|Hspell:2061:0|h[Flash Heal]|h|r"
+local idFromLink = C_Spell.GetSpellIDForSpellIdentifier(spellLink)
+if idFromLink then
+    print("Extracted ID:", idFromLink)
+end
+]]
+
+--[[
+Related Functions:
+- C_Spell.DoesSpellExist: Verify spell exists
+- C_Spell.GetSpellInfo: Get spell details
+- C_Spell.GetSpellLink: Get formatted spell link
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_C_Spell.GetSpellIDForSpellIdentifier
+• In-game FrameXML/Blizzard_APIDocumentationGenerated.lua
+]]
+
+--[[
+====================================================================
+C_Spell.IsCurrentSpell
+Returns whether a spell is currently being cast or queued
+Introduced: Patch 11.0.0 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+spellIdentifier (number|string) - SpellID, name, name(subtext), or link
+
+Returns:
+isCurrentSpell (boolean) - True if the spell is currently being cast or queued to be cast
+]]
+
+--[[
+Version History:
+- 11.0.0 (2024-07-23): Initial implementation
+- 11.0.5 (2024-09-10): Added proper error handling for invalid identifiers
+]]
+
+--[[
+Details:
+• Checks if a spell is actively being cast or queued for casting
+• Returns false for invalid spell identifiers
+• Useful for tracking current spell state in combat
+• Can be used to verify spell queuing status
+• More reliable than checking cast bar state
+]]
+
+--[[
+Best Practices:
+1. Use with UNIT_SPELLCAST events for cast tracking
+2. Prefer spell IDs over names for reliability
+3. Handle false returns for invalid identifiers
+4. Consider combining with C_Spell.GetSpellCooldown for full state
+5. Cache spell IDs for frequently checked spells
+]]
+
+--[[
+Example:
+-- Check if Fireball is being cast
+local spellID = 133 -- Fireball
+if C_Spell.IsCurrentSpell(spellID) then
+    print("Currently casting Fireball")
+end
+
+-- Track spell queuing
+local function OnSpellQueued(self, event, unit)
+    if unit == "player" then
+        local spellName = "Flash Heal"
+        if C_Spell.IsCurrentSpell(spellName) then
+            print(spellName.." is queued for casting")
+        end
+    end
+end
+]]
+
+--[[
+Related Functions:
+- C_Spell.GetSpellCooldown: Get spell cooldown info
+- UNIT_SPELLCAST_START: Track cast start
+- UNIT_SPELLCAST_SUCCEEDED: Track cast completion
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_C_Spell.IsCurrentSpell
+• In-game FrameXML/Blizzard_APIDocumentationGenerated.lua
+]]
+
+--[[
+====================================================================
+C_SpellBook.HasPetSpells
+Returns the number of available abilities for the player's combat pet
+Introduced: Patch 11.0.0 (The War Within)
+Last Changed: Patch 11.0.7 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+None
+
+Returns:
+numSpells (number|nil) - The number of pet abilities available, or nil if you do not have a pet with a spell book
+petToken (string) - Pet type, can be "DEMON" or "PET"
+]]
+
+--[[
+Version History:
+- 11.0.0 (2024-07-23): Added as replacement for HasPetSpells
+- 11.0.7 (2024-10-15): Current implementation
+]]
+
+--[[
+Details:
+• Returns information about the current pet's spellbook
+• The numSpells value represents total spellbook entries, not active pet bar slots
+• Works with all pet types (Hunter pets, Warlock demons, etc.)
+• Returns nil for numSpells if no pet is active or pet has no spellbook
+• petToken differentiates between demon and regular pet types
+• Critical for pet action bar and spellbook UI implementations
+]]
+
+--[[
+Best Practices:
+1. Check for nil return before using numSpells
+2. Handle both pet types appropriately
+3. Use with C_SpellBook.IsSpellBookItemUsable for pet ability checks
+4. Update tracking on PET_BAR_UPDATE event
+5. Consider SPELLS_CHANGED for pet ability modifications
+6. Cache results when appropriate
+7. Validate pet existence before spellbook operations
+]]
+
+--[[
+Example:
+-- Basic pet spellbook check
+local function HasPetAbilities()
+    local numSpells, petType = C_SpellBook.HasPetSpells()
+    if not numSpells then
+        print("No pet spellbook available")
+        return false
+    end
+    
+    print(string.format("Found %d abilities for %s", numSpells, petType))
+    return true
+end
+
+-- Pet spellbook tracking
+local f = CreateFrame("Frame")
+f:RegisterEvent("PET_BAR_UPDATE")
+f:RegisterEvent("SPELLS_CHANGED")
+f:SetScript("OnEvent", function(self, event)
+    if HasPetAbilities() then
+        -- Iterate through pet spellbook
+        for i = 1, numSpells do
+            local isUsable = C_SpellBook.IsSpellBookItemUsable(i, Enum.SpellBookSpellBank.Pet)
+            -- Handle pet ability state
+        end
+    end
+end)
+]]
+
+--[[
+Related Functions:
+- C_SpellBook.IsSpellBookItemUsable: Check pet ability usability
+- C_PetJournal.GetPetInfoByPetID: Get detailed pet information
+- C_SpellBook.GetSpellBookItemInfo: Get spell details
+- IsPetActive: Check if pet is currently active
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_HasPetSpells
+• In-game FrameXML/Blizzard_APIDocumentationGenerated.lua
+]]
+
+--[[
+====================================================================
+GetMouseFoci API
+Introduced: Patch 11.0.0 (The War Within)
+Replaces: GetMouseFocus (deprecated)
+====================================================================
+]]
+
+--[[
+Returns a list of frames that are currently under the mouse cursor, ordered from top to bottom.
+This replaces the deprecated GetMouseFocus() API which only returned the topmost frame.
+
+Returns:
+    ... (Frame) - Variable number of frame references, ordered from topmost to bottommost
+
+Usage:
+local frame1, frame2, frame3 = GetMouseFoci()
+]]
+
+--[[
+====================================================================
+ScriptRegion:IsMouseMotionFocus
+Introduced: Patch 11.0.0 (The War Within)
+====================================================================
+]]
+
+--[[
+Returns whether the frame is currently receiving OnUpdate mouse motion events.
+This is a new method added to support the multi-frame mouse focus system.
+
+Returns:
+    isMotionFocus (boolean) - Whether the frame is receiving mouse motion events
+]]
+
+--[[
+Best Practices:
+1. Use instead of checking GetMouseFocus() == region
+2. More efficient than iterating GetMouseFoci() table
+3. Works consistently across all client flavors
+4. Handles input propagation correctly
+]]
+
+--[[
+Example:
+local frame = CreateFrame("Frame")
+local isReceivingMotion = frame:IsMouseMotionFocus()
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_ScriptRegion_IsMouseMotionFocus
+• In-game FrameXML/GlobalAPI.lua
+]]
+
+--[[
+====================================================================
+SpellBook API Changes
+Updated: Patch 11.0.0 (The War Within)
+====================================================================
+]]
+
+--[[
+Major changes to SpellBook APIs in 11.0.0:
+
+1. New spellIdentifier parameter type:
+   - Can be a spell ID (number)
+   - Spell name (string)
+   - Or spell link (string)
+
+2. Enum usage for spell types:
+   - Spell.Type.SPELL
+   - Spell.Type.TALENT
+   - Spell.Type.PASSIVE
+   - Spell.Type.MASTERY
+   - Spell.Type.PVP_TALENT
+
+3. C_Spell namespace changes:
+   - C_Spell.GetSpellInfo now preferred over GetSpellInfo
+   - C_Spell.IsSpellDataCached(spellID) for checking spell data availability
+   - C_Spell.RequestLoadSpellData(spellID) to preload spell data
+
+Migration Notes:
+- Update all GetSpellInfo calls to use C_Spell.GetSpellInfo
+- Use new enum values instead of numeric constants
+- Handle spell data loading explicitly with IsSpellDataCached/RequestLoadSpellData
+]]
+
+--[[
+====================================================================
+Best Practices for 11.0.0 API Usage
+====================================================================
+]]
+
+--[[
+1. Mouse Focus Handling:
+   - Always use GetMouseFoci() instead of GetMouseFocus()
+   - Check all returned frames when needed
+   - Use IsMouseMotionFocus() for motion event handling
+
+2. Spell Identification:
+   - Prefer spell IDs over names when possible
+   - Use C_Spell namespace APIs
+   - Cache spell data proactively
+
+3. Error Handling:
+   - Check for nil returns from GetMouseFoci
+   - Verify spell data is cached before usage
+   - Handle deprecated API warnings
+
+4. Performance:
+   - Cache GetMouseFoci results when processing multiple frames
+   - Batch spell data requests
+   - Use appropriate event handlers for mouse motion
+]]
+
+--[[
+====================================================================
+New Events in Patch 11.0.0
+====================================================================
+]]
+
+--[[
+ACCOUNT_CHARACTER_CURRENCY_DATA_RECEIVED
+Fired when currency data is received for a character
+]]
+
+--[[
+ACTIVE_DELVE_DATA_UPDATE
+Fired when delve data is updated
+]]
+
+--[[
+BANK_TAB_SETTINGS_UPDATED
+Fired when bank tab settings are changed
+]]
+
+--[[
+CLUB_FINDER_GUILD_REALM_NAME_UPDATED
+Fired when guild realm name is updated in club finder
+]]
+
+--[[
+COMBO_TARGET_CHANGED
+Fired when combo point target changes
+]]
+
+--[[
+CONVERT_TO_BIND_TO_ACCOUNT_CONFIRM
+Fired when confirming bind to account conversion
+]]
+
+--[[
+CRAFTINGORDERS_CRAFT_ORDER_RESPONSE
+Fired when receiving response for crafting orders
+]]
+
+--[[
+CURRENCY_TRANSFER_FAILED
+Fired when currency transfer fails
+]]
+
+--[[
+CURRENCY_TRANSFER_LOG_UPDATE
+Fired when currency transfer log is updated
+]]
+
+--[[
+DAILY_RESET_INSTANCE_WELCOME
+Fired when daily instance reset occurs
+]]
+
+--[[
+IMMERSIVE_INTERACTION_BEGIN/END
+Fired when immersive interaction starts/ends
+]]
+
+--[[
+INSTANCE_RESET_WARNING
+Fired when instance reset warning occurs
+]]
+
+--[[
+LEARNED_SPELL_IN_SKILL_LINE
+Fired when learning a spell in a skill line
+]]
+
+--[[
+PERKS_ACTIVITIES_TRACKED_LIST_CHANGED
+Fired when tracked perks activities list changes
+]]
+
+--[[
+PLAYER_ACCOUNT_BANK_TAB_SLOTS_CHANGED
+Fired when account bank tab slots change
+]]
+
+--[[
+PLAYER_MAP_CHANGED
+Fired when player map changes
+]]
+
+--[[
+SHOW_DELVES_DISPLAY_UI
+Fired when delves UI should be shown
+]]
+
+--[[
+SPELL_TEXT_UPDATE
+Fired when spell text is updated
+]]
+
+--[[
+TAXI_NODE_STATUS_CHANGED
+Fired when taxi node status changes
+]]
+
+--[[
+TRAIT_SUB_TREE_CHANGED
+Fired when trait sub-tree changes
+]]
+
+--[[
+UNIT_MAX_HEALTH_MODIFIERS_CHANGED
+Fired when unit max health modifiers change
+]]
+
+--[[
+UPDATE_SPELL_TARGET_ITEM_CONTEXT
+Fired when spell target item context updates
+]]
+
+--[[
+WALK_IN_DATA_UPDATE
+Fired when walk-in data updates
+]]
+
+--[[
+====================================================================
+New Enums in 11.0.0 (The War Within)
+====================================================================
+]]
+
+--[[
+Enum.SpellType = {
+    SPELL = 0,
+    TALENT = 1,
+    PASSIVE = 2,
+    MASTERY = 3,
+    PVP_TALENT = 4
+}
+
+Enum.SpellBookSpellBank = {
+    Player = 0,  -- Replaces "spell" / BOOKTYPE_SPELL
+    Pet = 1      -- Replaces "pet" / BOOKTYPE_PET
+}
+
+Enum.HotfixType = {
+    DISABLED = 0,
+    ENABLED = 1,
+    REMOVED = 2
+}
+
+Enum.DifficultyType = {
+    NONE = 0,
+    DUNGEON = 8,
+    NORMAL = 14,
+    HEROIC = 15,
+    MYTHIC = 16,
+    LFR = 17
+}
+
+--[[
+====================================================================
+Settings API Changes
+Updated: Patch 11.0.2 (The War Within)
+====================================================================
+]]
+
+--[[
+Major changes to Settings API in 11.0.2:
+
+1. Settings Creation:
+   - New structured approach to creating settings
+   - Enhanced validation and type safety
+   - Improved error handling for invalid configurations
+
+2. Key Changes:
+   - Settings.RegisterAddOnCategory() for addon settings registration
+   - Settings.CreateSetting() for individual setting creation
+   - Settings.GetSetting() for retrieving setting values
+   - Settings.SetSetting() for updating setting values
+
+3. Setting Types:
+   - Boolean
+   - Number (with optional range validation)
+   - String
+   - Enum (with predefined values)
+   - Table (for complex settings)
+
+4. Validation:
+   - Built-in type checking
+   - Range validation for numeric settings
+   - Enum value validation
+   - Custom validation functions
+
+Migration Notes:
+- Update existing settings to use new creation pattern
+- Add proper validation for setting values
+- Handle setting change events appropriately
+- Cache setting references for better performance
+]]
+
+--[[
+Example Usage:
+local category = Settings.RegisterAddOnCategory("MyAddon")
+local setting = Settings.CreateSetting({
+    name = "EnableFeature",
+    type = "boolean",
+    defaultValue = true,
+    onChange = function(value)
+        print("Setting changed to:", value)
+    end
+})
+
+-- Get current value
+local value = Settings.GetSetting(setting)
+
+-- Update value
+Settings.SetSetting(setting, false)
+]]
+
+--[[
+Best Practices:
+1. Settings Creation:
+   - Use descriptive names for settings
+   - Provide clear descriptions
+   - Set appropriate default values
+   - Implement validation where needed
+
+2. Settings Management:
+   - Cache setting references
+   - Handle setting changes gracefully
+   - Validate values before applying
+   - Use appropriate setting types
+
+3. Error Handling:
+   - Check for nil returns
+   - Handle validation failures
+   - Provide user feedback
+   - Log setting errors appropriately
+
+4. Performance:
+   - Batch setting updates when possible
+   - Cache frequently accessed settings
+   - Use appropriate event handlers
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/Patch_11.0.2/API_changes
+• In-game FrameXML/Blizzard_APIDocumentationGenerated.lua
+]]
+
+--[[
+====================================================================
+Settings.RegisterAddOnCategory
+Creates a new settings category for an addon
+Introduced: Patch 11.0.2 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+name (string) - Name of the addon/category
+options (table?) - Optional configuration:
+  .displayName (string?) - Localized display name
+  .description (string?) - Category description
+  .icon        (number?) - FileID for category icon
+  .parent      (table?)  - Parent category reference
+
+Returns:
+category (table) - Category reference for creating settings
+]]
+
+--[[
+====================================================================
+Settings.CreateSetting
+Creates a new setting with validation and change tracking
+Introduced: Patch 11.0.2 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+config (table) - Setting configuration:
+  .name         (string)   - Unique setting identifier
+  .type         (string)   - Setting type ("boolean", "number", "string", "enum", "table")
+  .defaultValue (any)      - Default setting value
+  .category     (table?)   - Category reference from RegisterAddOnCategory
+  .displayName  (string?)  - Localized display name
+  .description  (string?)  - Setting description
+  .onChange     (function?) - Callback for value changes
+  .validate     (function?) - Custom validation function
+  .min         (number?)   - Minimum value for number settings
+  .max         (number?)   - Maximum value for number settings
+  .step        (number?)   - Step size for number settings
+  .enumValues   (table?)   - Valid values for enum settings
+
+Returns:
+setting (table) - Setting reference for get/set operations
+]]
+
+--[[
+====================================================================
+Settings.GetSetting
+Retrieves the current value of a setting
+Introduced: Patch 11.0.2 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+setting (table) - Setting reference from CreateSetting
+
+Returns:
+value (any) - Current setting value
+]]
+
+--[[
+====================================================================
+Settings.SetSetting
+Updates the value of a setting with validation
+Introduced: Patch 11.0.2 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+setting (table) - Setting reference from CreateSetting
+value (any) - New setting value
+
+Returns:
+success (boolean) - Whether the value was successfully updated
+errorMessage (string?) - Error message if validation failed
+]]
+
+--[[
+====================================================================
+Settings.RegisterCanvasLayoutCallback
+Registers a callback for canvas layout changes
+Introduced: Patch 11.0.2 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+frame (Frame) - Frame to receive layout updates
+callback (function) - Function called on layout changes:
+  function(frame, layoutInfo)
+    layoutInfo.isTopLevel (boolean) - Whether frame is at root level
+    layoutInfo.indent (number) - Indentation level
+    layoutInfo.width (number) - Available width
+    layoutInfo.height (number) - Available height
+end
+
+Returns: None
+]]
+
+--[[
+Example - Complex Settings:
+local category = Settings.RegisterAddOnCategory("MyAddon", {
+    displayName = "My Addon Settings",
+    description = "Configure addon features"
+})
+
+-- Numeric setting with range
+local countSetting = Settings.CreateSetting({
+    name = "ItemCount",
+    type = "number",
+    defaultValue = 5,
+    category = category,
+    min = 1,
+    max = 10,
+    step = 1,
+    validate = function(value)
+        return value % 2 == 0, "Value must be even"
+    end
+})
+
+-- Enum setting
+local modeSetting = Settings.CreateSetting({
+    name = "OperationMode",
+    type = "enum",
+    defaultValue = "AUTO",
+    category = category,
+    enumValues = {
+        "AUTO",
+        "MANUAL",
+        "HYBRID"
+    }
+})
+
+-- Handle layout updates
+local function OnLayoutChanged(frame, layoutInfo)
+    frame:SetSize(layoutInfo.width, layoutInfo.height)
+    -- Update child elements
+end
+
+local settingsFrame = CreateFrame("Frame")
+Settings.RegisterCanvasLayoutCallback(settingsFrame, OnLayoutChanged)
+]]
+
+--[[
+====================================================================
+GetMouseFocus (Deprecated)
+Returns the frame currently under the mouse cursor
+Introduced: Patch 1.0 (Vanilla)
+Deprecated: Patch 11.0.0 (The War Within) - Replaced by GetMouseFoci
+====================================================================
+]]
+
+--[[
+Deprecation Notes:
+- Replaced by GetMouseFoci which returns multiple frames
+- Will be removed in a future patch
+- Use ScriptRegion:IsMouseMotionFocus() for motion event checks
+- Migrate to GetMouseFoci for future compatibility
+]]
+
+--[[
+Migration Guide:
+-- Legacy code
+local frame = GetMouseFocus()
+
+-- Modern equivalent
+local topFrame = select(1, GetMouseFoci())
+-- Or for checking specific frame:
+if frame:IsMouseMotionFocus() then
+    -- Handle mouse focus
+end
+]]
+
+--[[
+====================================================================
+HasPetSpells (Deprecated)
+Returns information about pet spellbook
+Introduced: Patch 1.0 (Vanilla)
+Deprecated: Patch 11.0.0 (The War Within) - Replaced by C_SpellBook.HasPetSpells
+====================================================================
+]]
+
+--[[
+Deprecation Notes:
+- Replaced by C_SpellBook.HasPetSpells
+- Will be removed in a future patch
+- Returns more detailed information in new API
+- Migrate to C_SpellBook.HasPetSpells for future compatibility
+]]
+
+--[[
+Migration Guide:
+-- Legacy code
+local hasSpells, petType = HasPetSpells()
+
+-- Modern equivalent
+local numSpells, petType = C_SpellBook.HasPetSpells()
+if numSpells then
+    -- Handle pet spells
+end
+]]
+
+--[[
+====================================================================
+GetMouseFoci
+Returns a list of frames under the mouse cursor
+Introduced: Patch 11.0.0 (The War Within)
+====================================================================
+]]
+
+--[[
+Returns:
+... (Frame) - Variable number of frame references, ordered from topmost to bottommost
+
+Details:
+• Returns all frames currently under the mouse cursor
+• Frames are ordered by z-index (top to bottom)
+• Supports new mouse input propagation system
+• More detailed than deprecated GetMouseFocus
+]]
+
+--[[
+Best Practices:
+1. Check all returned frames when needed
+2. Use IsMouseMotionFocus() for motion event handling
+3. Cache results when processing multiple frames
+4. Handle nil returns appropriately
+]]
+
+--[[
+Example:
+local frame1, frame2, frame3 = GetMouseFoci()
+if frame1 then
+    -- Process topmost frame
+end
+
+-- Checking specific frame
+for _, frame in ipairs({GetMouseFoci()}) do
+    if frame == myFrame then
+        -- Frame is under cursor
+    end
+end
+]]
+
+--[[
+====================================================================
+11.0.5 API Updates (The War Within)
+Important changes for Hero-Lib, Hero-DBC, and Hero Rotations
+====================================================================
+]]
+
+--[[
+Version History:
+- 11.0.5 (2024-09-10): Added new spell management APIs
+- 11.0.7 (2024-10-15): Minor stability improvements and bug fixes
+]]
+
+--[[
+Key Changes:
+1. Enhanced resource management APIs
+2. Improved talent-modified ability handling
+3. Better pet management tools
+4. Enhanced PvP and crowd control tracking
+5. More efficient spell information retrieval
+]]
+
+--[[
+====================================================================
+C_Spell.GetSpellPowerCost
+Returns detailed resource cost information for spells
+====================================================================
+]]
+
+--[[
+Parameters:
+spellIdentifier (number|string) - SpellID, name, or hyperlink
+
+Returns:
+powerCosts (table[]?) - Array of power cost info tables
+  .type            (Enum.PowerType) - Resource type
+  .name            (string)         - Resource name
+  .cost            (number)         - Total cost
+  .minCost         (number)         - Minimum cost
+  .costPercent     (number)         - Cost as % of max
+  .costPerSec      (number)         - Channeled cost/sec
+  .requiredAuraID  (number)         - Required aura
+  .hasRequiredAura (boolean)        - Has required aura
+]]
+
+--[[
+====================================================================
+C_Spell.GetOverrideSpell
+Returns active spell ID considering talent modifications
+====================================================================
+]]
+
+--[[
+Parameters:
+spellIdentifier (number|string) - Base spell identifier
+spec (number?) - Specialization to check
+onlyKnown (boolean?) - Known spells only
+ignoreOverrideSpellID (number?) - Override to ignore
+
+Returns:
+overrideSpellID (number) - Active spell version
+]]
+
+--[[
+====================================================================
+C_Spell.GetSpellLossOfControlCooldown
+Returns DR and immunity timing information
+====================================================================
+]]
+
+--[[
+Parameters:
+spellIdentifier (number|string) - Spell identifier
+
+Returns:
+startTime (number) - Effect start time
+duration (number) - Total duration
+]]
+
+--[[
+Best Practices for 11.0.5+ APIs:
+1. Resource Management
+   - Cache GetSpellPowerCost results
+   - Handle multi-resource costs
+   - Consider percentage-based costs
+   - Track channeled resource drain
+
+2. Talent Interactions
+   - Use GetOverrideSpell for modified abilities
+   - Cache results per spec
+   - Update cache on talent changes
+   - Handle nil returns gracefully
+
+3. PvP Functionality
+   - Track DR timings with GetSpellLossOfControlCooldown
+   - Consider talent effects on DRs
+   - Handle immunities appropriately
+   - Update on PvP status changes
+
+4. Performance Optimization
+   - Cache frequently accessed data
+   - Use appropriate events for updates
+   - Handle async loading gracefully
+   - Minimize unnecessary API calls
+]]
+
+--[[
+====================================================================
+GetUnitChargedPowerPoints
+Returns information about a unit's charged combo points
+Introduced: Patch 9.0.1 (Shadowlands)
+Last Changed: Patch 11.0.7 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+unit (string) - Unit token to query ("player", "target", etc.)
+
+Returns:
+... (number) - Variable number of charged combo point indices, or nil if unit has no charged points
+]]
+
+--[[
+Version History:
+- 9.0.1 (2020-10-13): Initial implementation
+]]
+
+--[[
+Details:
+• Returns indices of charged combo points for the specified unit
+• Primarily used for Rogue and Druid combo point tracking
+• Returns nil if unit has no charged points or is invalid
+• Indices are 1-based and correspond to combo point positions
+• Critical for optimal damage rotation planning
+]]
+
+--[[
+Best Practices:
+1. Check for nil returns before processing results
+2. Use with GetComboPoints for complete combo point state
+3. Consider talent effects on charging mechanics
+4. Cache results when appropriate for performance
+5. Update on UNIT_POWER_UPDATE and related events
+]]
+
+--[[
+Example:
+local function HasChargedPoints()
+    local points = {GetUnitChargedPowerPoints("player")}
+    if points[1] then
+        print("Charged points:", table.concat(points, ", "))
+        return true
+    end
+    return false
+end
+
+-- Event handling example
+local f = CreateFrame("Frame")
+f:RegisterEvent("UNIT_POWER_UPDATE")
+f:SetScript("OnEvent", function(_, event, unit, powerType)
+    if unit == "player" and powerType == "COMBO_POINTS" then
+        HasChargedPoints()
+    end
+end)
+]]
+
+--[[
+Related Functions:
+- GetComboPoints: Get total combo points
+- UnitPower: Get current power resource
+- UNIT_POWER_UPDATE event: Track power changes
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_GetUnitChargedPowerPoints
+• In-game FrameXML/GlobalAPI.lua
+]]
+
+--[[
+====================================================================
+UNIT_POWER_BAR_SHOW
+Event fired when a unit's alternate power bar becomes visible
+Introduced: Patch 4.0.1 (Cataclysm)/1.13.2 (Classic)
+====================================================================
+]]
+
+--[[
+Parameters:
+unitTarget (string) - UnitId of the unit whose power bar is shown
+]]
+
+--[[
+Version History:
+- 4.0.1 (2010-10-12): Added in retail
+- 1.13.2 (2019-08-26): Added in Classic
+]]
+
+--[[
+Details:
+• Fires when an alternate power bar becomes visible for a unit
+• Common for boss encounters with special power mechanics
+• Paired with UNIT_POWER_BAR_HIDE event
+• Used for tracking special resource displays
+• Important for encounter-specific UI elements
+]]
+
+--[[
+Best Practices:
+1. Pair with UNIT_POWER_BAR_HIDE for complete state tracking
+2. Use with GetUnitPowerBarInfo for bar details
+3. Consider encounter mechanics when handling
+4. Cache power bar information when appropriate
+5. Handle unit validation for cross-realm scenarios
+]]
+
+--[[
+Example:
+local f = CreateFrame("Frame")
+f:RegisterEvent("UNIT_POWER_BAR_SHOW")
+f:SetScript("OnEvent", function(_, event, unit)
+    if unit == "target" then
+        local info = GetUnitPowerBarInfo(unit)
+        if info then
+            print("Alternate power bar shown for", UnitName(unit))
+        end
+    end
+end)
+]]
+
+--[[
+Related Functions:
+- GetUnitPowerBarInfo: Get power bar details
+- UnitPowerBarID: Get power bar identifier
+- UNIT_POWER_BAR_HIDE event: Track bar hiding
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/UNIT_POWER_BAR_SHOW
+• In-game FrameXML/GlobalAPI.lua
+]]
+
+--[[
+====================================================================
+UNIT_POWER_BAR_TIMER_UPDATE
+Event fired when a unit's alternate power bar timer updates
+Introduced: Patch 4.3.0 (Cataclysm)/1.13.2 (Classic)
+====================================================================
+]]
+
+--[[
+Parameters:
+unitTarget (string) - UnitId of the unit whose power bar timer updated
+]]
+
+--[[
+Version History:
+- 4.3.0 (2011-11-29): Added in retail
+- 1.13.2 (2019-08-26): Added in Classic
+]]
+
+--[[
+Details:
+• Fires when the timer on an alternate power bar updates
+• Used for tracking timed power mechanics in encounters
+• Complements UNIT_POWER_BAR_SHOW/HIDE events
+• Important for encounter-specific timing displays
+• Helps track duration-based power mechanics
+]]
+
+--[[
+Best Practices:
+1. Use with GetUnitPowerBarTimerInfo for complete timer data
+2. Consider encounter-specific timing requirements
+3. Handle timer updates efficiently to avoid performance impact
+4. Validate unit existence before processing
+5. Cache timer information when appropriate
+]]
+
+--[[
+Example:
+local f = CreateFrame("Frame")
+f:RegisterEvent("UNIT_POWER_BAR_TIMER_UPDATE")
+f:SetScript("OnEvent", function(_, event, unit)
+    if unit == "target" then
+        local info = GetUnitPowerBarTimerInfo(unit)
+        if info then
+            print("Power bar timer updated for", UnitName(unit))
+        end
+    end
+end)
+]]
+
+--[[
+Related Functions:
+- GetUnitPowerBarTimerInfo: Get timer details
+- GetUnitPowerBarInfo: Get power bar information
+- UNIT_POWER_BAR_SHOW/HIDE events: Track bar visibility
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/UNIT_POWER_BAR_TIMER_UPDATE
+• In-game FrameXML/GlobalAPI.lua
+]]
+
+--[[
+====================================================================
+UNIT_POWER_FREQUENT
+Event fired when a unit's power changes rapidly
+Introduced: Patch 4.3.0 (Cataclysm)/1.13.2 (Classic)
+====================================================================
+]]
+
+--[[
+Parameters:
+unitTarget (string) - UnitId of the unit whose power changed
+powerType (string) - Type of power that changed (e.g., "MANA", "RAGE", "ENERGY")
+]]
+
+--[[
+Version History:
+- 4.3.0 (2011-11-29): Added in retail
+- 1.13.2 (2019-08-26): Added in Classic
+]]
+
+--[[
+Details:
+• Fires multiple times per frame during rapid power changes
+• More frequent updates than UNIT_POWER_UPDATE
+• Used for tracking fast-changing resources
+• Important for accurate power regeneration tracking
+• Useful for real-time resource monitoring
+]]
+
+--[[
+Best Practices:
+1. Use for high-precision power tracking needs
+2. Consider throttling updates for performance
+3. Combine with UnitPower for current values
+4. Handle all relevant power types
+5. Cache power information when appropriate
+]]
+
+--[[
+Example:
+local f = CreateFrame("Frame")
+f:RegisterEvent("UNIT_POWER_FREQUENT")
+f:SetScript("OnEvent", function(_, event, unit, powerType)
+    if unit == "player" then
+        local power = UnitPower("player", powerType)
+        print(string.format("%s power changed to: %d", powerType, power))
+    end
+end)
+]]
+
+--[[
+Related Functions:
+- UnitPower: Get current power value
+- UnitPowerMax: Get maximum power value
+- UNIT_POWER_UPDATE event: Less frequent updates
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/UNIT_POWER_FREQUENT
+• In-game FrameXML/GlobalAPI.lua
+]]
+
+--[[
+====================================================================
+UnitPowerBarID
+Returns the alternate power bar identifier for a unit
+Introduced: Patch 8.3.0 (Battle for Azeroth)
+====================================================================
+]]
+
+--[[
+Parameters:
+unitToken (string) - UnitId of the unit to query ("player", "target", etc.)
+
+Returns:
+barID (number) - Identifier for the unit's alternate power bar, or nil if none
+]]
+
+--[[
+Version History:
+- 8.3.0 (2020-01-14): Added. Partly replaces deprecated alternate power info API
+]]
+
+--[[
+Details:
+• Returns identifier for unit's alternate power bar
+• Used to track special encounter power mechanics
+• Part of the modern alternate power bar API set
+• Returns nil if unit has no alternate power bar
+• Critical for encounter-specific power tracking
+]]
+
+--[[
+Best Practices:
+1. Check for nil returns when no power bar exists
+2. Use with GetUnitPowerBarInfo for complete details
+3. Cache barID when appropriate for performance
+4. Update cache on UNIT_POWER_BAR_SHOW/HIDE events
+5. Validate unit existence before querying
+]]
+
+--[[
+Example:
+local function CheckAlternatePower(unit)
+    local barID = UnitPowerBarID(unit)
+    if barID then
+        local info = GetUnitPowerBarInfo(unit)
+        if info then
+            print(string.format("Unit %s has power bar type: %d", UnitName(unit), barID))
+        end
+    end
+end
+
+-- Event handling example
+local f = CreateFrame("Frame")
+f:RegisterEvent("UNIT_POWER_BAR_SHOW")
+f:SetScript("OnEvent", function(_, event, unit)
+    CheckAlternatePower(unit)
+end)
+]]
+
+--[[
+Related Functions:
+- GetUnitPowerBarInfo: Get detailed bar information
+- GetUnitPowerBarStrings: Get localized bar text
+- UNIT_POWER_BAR_SHOW/HIDE events: Track bar visibility
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_UnitPowerBarID
+• In-game FrameXML/GlobalAPI.lua
+]]
+
+--[[
+====================================================================
+UnitPower
+Returns the current power resource of a unit
+Introduced: Patch 3.0.2 (Wrath of the Lich King)/1.13.2 (Classic)
+====================================================================
+]]
+
+--[[
+Parameters:
+unitToken (string) - UnitId of the unit to query ("player", "target", etc.)
+powerType (Enum.PowerType?) - Type of resource to query (mana/rage/energy/etc)
+unmodified (boolean?) - Return higher precision internal value (for graphical use only)
+
+Returns:
+power (number) - The unit's current power level
+]]
+
+--[[
+Version History:
+- 3.0.2 (2008-10-14): Added, replaces UnitMana()
+- 1.13.2 (2019-08-26): Added in Classic
+]]
+
+--[[
+Details:
+• Returns current power resource value for the specified unit
+• If no powerType specified, returns primary power type (e.g., energy for cat form)
+• Use UnitPowerType() to determine current primary power type
+• Unmodified parameter provides higher precision for UI display
+• Critical for resource-based ability decision making
+]]
+
+--[[
+Best Practices:
+1. Specify powerType for consistent behavior across forms/stances
+2. Use with UnitPowerMax for percentage calculations
+3. Consider power type changes from stance/form shifts
+4. Cache values when appropriate for performance
+5. Update on UNIT_POWER_UPDATE/FREQUENT events
+]]
+
+--[[
+Example:
+-- Check if unit has enough mana for an ability
+local function HasEnoughMana(unit, requiredMana)
+    local currentMana = UnitPower(unit, Enum.PowerType.Mana)
+    return currentMana >= requiredMana
+end
+
+-- Track power changes
+local f = CreateFrame("Frame")
+f:RegisterEvent("UNIT_POWER_UPDATE")
+f:SetScript("OnEvent", function(_, event, unit, powerType)
+    if unit == "player" and powerType == "MANA" then
+        local current = UnitPower("player", Enum.PowerType.Mana)
+        local max = UnitPowerMax("player", Enum.PowerType.Mana)
+        print(string.format("Mana: %d/%d (%.1f%%)", current, max, current/max*100))
+    end
+end)
+]]
+
+--[[
+Related Functions:
+- UnitPowerMax: Get maximum power value
+- UnitPowerType: Get current power type
+- UNIT_POWER_UPDATE/FREQUENT events: Track power changes
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_UnitPower
+• In-game FrameXML/GlobalAPI.lua
+]]
+
+--[[
+====================================================================
+UnitPowerMax
+Returns the maximum power resource value for a unit
+Introduced: Patch 3.0.2 (Wrath of the Lich King)
+Last Changed: Patch 11.0.7 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+unitToken (string) - UnitId of the unit to query ("player", "target", etc.)
+powerType (Enum.PowerType?) - Type of resource to query (mana/rage/energy/etc)
+unmodified (boolean?) - Return higher precision internal value (for graphical use only)
+
+Returns:
+maxPower (number) - The unit's maximum amount of the queried resource
+]]
+
+--[[
+Version History:
+- 3.0.2 (2008-10-14): Added, replaces UnitManaMax()
+]]
+
+--[[
+Details:
+• Returns maximum power resource value for the specified unit
+• If no powerType specified, returns primary power type (e.g., energy for cat form)
+• Use UnitPowerType() to determine current primary power type
+• Unmodified parameter provides higher precision for UI display
+• Critical for resource percentage calculations and UI displays
+]]
+
+--[[
+Best Practices:
+1. Specify powerType for consistent behavior across forms/stances
+2. Use with UnitPower for percentage calculations
+3. Consider power type changes from stance/form shifts
+4. Cache values when appropriate for performance
+5. Update cache on relevant events (UNIT_MAXPOWER, UNIT_DISPLAYPOWER)
+]]
+
+--[[
+Example:
+-- Calculate power percentage
+local function GetPowerPercent(unit, powerType)
+    local current = UnitPower(unit, powerType)
+    local max = UnitPowerMax(unit, powerType)
+    return max > 0 and (current / max * 100) or 0
+end
+
+-- Track mana percentage
+local f = CreateFrame("Frame")
+f:RegisterEvent("UNIT_POWER_UPDATE")
+f:RegisterEvent("UNIT_MAXPOWER")
+f:SetScript("OnEvent", function(_, event, unit, powerType)
+    if unit == "player" and powerType == "MANA" then
+        print(string.format("Mana: %.1f%%", GetPowerPercent("player", Enum.PowerType.Mana)))
+    end
+end)
+]]
+
+--[[
+Related Functions:
+- UnitPower: Get current power value
+- UnitPowerType: Get current power type
+- UNIT_MAXPOWER event: Track maximum power changes
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_UnitPowerMax
+• In-game FrameXML/GlobalAPI.lua
+]]
+
+--[[
+====================================================================
+UnitPowerType
+Returns information about a unit's power type (mana, rage, energy, etc.)
+Introduced: Patch 1.0.0 (Vanilla)/1.13.2 (Classic)
+====================================================================
+]]
+
+--[[
+Parameters:
+unitToken (string) - UnitId of the unit to query ("player", "target", etc.)
+index (number?) = 0 - Optional value for classes with multiple powerTypes. If not specified, information about the first (currently active) power type will be returned.
+
+Returns:
+powerType (Enum.PowerType) - The ID corresponding to the unit's queried power type
+powerToken (string) - String identifier for the power type:
+  • "MANA"
+  • "RAGE" 
+  • "FOCUS"
+  • "ENERGY"
+  • "HAPPINESS"
+  • "RUNES"
+  • "RUNIC_POWER"
+  • "SOUL_SHARDS"
+  • "ECLIPSE"
+  • "HOLY_POWER"
+  • "AMMOSLOT"
+  • "FUEL"
+  • "STAGGER"
+  • "CHI"
+  • "INSANITY"
+  • "ARCANE_CHARGES"
+  • "FURY"
+  • "PAIN"
+rgbR (number?) - Alternative red component for this power type. Nil for most standard power types.
+rgbG (number?) - Alternative green component for this power type. Nil for most standard power types.
+rgbB (number?) - Alternative blue component for this power type. Nil for most standard power types.
+]]
+
+--[[
+Version History:
+- 1.0.0 (2004-11-23): Initial implementation
+- 1.13.2 (2019-08-26): Added in Classic
+]]
+
+--[[
+Details:
+• Returns numeric ID and string token for unit's power type
+• Colors for standard power types stored in PowerBarColor global table
+• Some special types implement custom colors via RGB returns
+• Critical for resource-based ability decision making
+• Used for UI power bar coloring and resource tracking
+]]
+
+--[[
+Best Practices:
+1. Cache results when checking frequently
+2. Handle nil returns for invalid units
+3. Consider form/stance changes affecting power type
+4. Use with UnitPower/UnitPowerMax for complete resource info
+5. Handle custom RGB colors when present
+]]
+
+--[[
+Example:
+-- Get player's current power type
+local powerType, powerToken = UnitPowerType("player")
+print(string.format("Current power type: %s", powerToken))
+
+-- Handle power bar coloring
+local function GetPowerColor(unit)
+    local _, powerToken, altR, altG, altB = UnitPowerType(unit)
+    local info = PowerBarColor[powerToken]
+    
+    if info then
+        return info.r, info.g, info.b
+    elseif altR then
+        return altR, altG, altB
+    else
+        -- Default to mana color if no other info available
+        info = PowerBarColor["MANA"]
+        return info.r, info.g, info.b
+    end
+end
+]]
+
+--[[
+Related Functions:
+- UnitPower: Get current power value
+- UnitPowerMax: Get maximum power value
+- UNIT_DISPLAYPOWER event: Track power type changes
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_UnitPowerType
+• In-game FrameXML/GlobalAPI.lua
+]]
+
+--[[
+====================================================================
+UnitIsUnit
+Returns whether two unit tokens refer to the same entity
+Introduced: Patch 1.0.0 (Vanilla)/1.13.2 (Classic)
+====================================================================
+]]
+
+--[[
+Parameters:
+unit1 (string) - First UnitId to compare (e.g., "player", "party1", "pet")
+unit2 (string) - Second UnitId to compare (e.g., "target", "focus")
+
+Returns:
+isSame (boolean) - True if both units are the same entity, nil otherwise
+]]
+
+--[[
+Version History:
+- 1.0.0 (2004-11-23): Initial implementation
+- 1.13.2 (2019-08-26): Added in Classic
+]]
+
+--[[
+Details:
+• Compares two unit tokens to determine if they refer to the same entity
+• Returns nil (not false) when units are different
+• Useful for threat detection and unit relationship verification
+• More efficient than comparing names or GUIDs
+• Critical for preventing duplicate actions on same target
+]]
+
+--[[
+Best Practices:
+1. Validate unit existence before comparison
+2. Use instead of comparing UnitName or UnitGUID
+3. Handle nil returns appropriately
+4. Cache results when checking frequently
+5. Consider using for optimization in unit processing loops
+]]
+
+--[[
+Example:
+-- Check if target is targeting you
+if UnitIsUnit("targettarget", "player") then
+    print(string.format("%s is targeting you!", UnitName("target")))
+end
+
+-- Prevent duplicate actions
+local function ProcessUnit(unit)
+    if UnitIsUnit(unit, "target") then
+        -- Skip if already processing this unit
+        return
+    end
+    -- Process unit
+end
+]]
+
+--[[
+Related Functions:
+- UnitExists: Verify unit validity
+- UnitGUID: Get unique unit identifier
+- UnitName: Get unit name
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_UnitIsUnit
+• In-game FrameXML/GlobalAPI.lua
+]]
+
+--[[
+====================================================================
+UnitHealth
+Returns the current health of a unit
+Introduced: Patch 1.0.0 (Vanilla)/1.13.2 (Classic)
+Last Changed: Patch 11.0.7 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+unitToken (string) - UnitId of the unit to query ("player", "target", etc.)
+
+Returns:
+health (number) - The unit's current health value, or 0 if the unit doesn't exist
+]]
+
+--[[
+Version History:
+- 1.0.0 (2004-11-23): Initial implementation
+- 1.13.2 (2019-08-26): Added in Classic
+- 11.0.7 (2024-10-15): Current implementation
+]]
+
+--[[
+Details:
+• Returns current health value for the specified unit
+• Returns 0 if the unit doesn't exist
+• Critical for health-based decision making
+• Used for UI health bar displays and healing logic
+• Consider using with UnitHealthMax for percentage calculations
+]]
+
+--[[
+Best Practices:
+1. Validate unit existence before using returned value
+2. Use with UnitHealthMax for percentage calculations
+3. Cache values when checking frequently
+4. Update on UNIT_HEALTH/UNIT_HEALTH_FREQUENT events
+5. Consider using GetUnitHealthModifier for modified values
+]]
+
+--[[
+Example:
+-- Calculate health percentage
+local function GetHealthPercent(unit)
+    local current = UnitHealth(unit)
+    local max = UnitHealthMax(unit)
+    return max > 0 and (current / max * 100) or 0
+end
+
+-- Track health changes
+local f = CreateFrame("Frame")
+f:RegisterEvent("UNIT_HEALTH")
+f:SetScript("OnEvent", function(_, event, unit)
+    if unit == "player" then
+        local percent = GetHealthPercent("player")
+        print(string.format("Health: %.1f%%", percent))
+    end
+end)
+]]
+
+--[[
+Related Functions:
+- UnitHealthMax: Get maximum health value
+- GetUnitHealthModifier: Get health modification value
+- UNIT_HEALTH/UNIT_HEALTH_FREQUENT events: Track health changes
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_UnitHealth
+• In-game FrameXML/GlobalAPI.lua
+]]
+
+--[[
+====================================================================
+UNIT_POWER_UPDATE
+Event fired when a unit's power resource changes
+Introduced: Patch 1.0.0 (Vanilla)/1.13.2 (Classic)
+Last Changed: Patch 11.0.7 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+unitTarget (string) - UnitId of the unit whose power changed ("player", "target", etc.)
+powerType (string) - Type of power that changed:
+  • "MANA"
+  • "RAGE"
+  • "FOCUS"
+  • "ENERGY"
+  • "COMBO_POINTS"
+  • "RUNES"
+  • "RUNIC_POWER"
+  • "SOUL_SHARDS"
+  • "LUNAR_POWER"
+  • "HOLY_POWER"
+  • "ALTERNATE"
+  • "MAELSTROM"
+  • "CHI"
+  • "INSANITY"
+  • "ARCANE_CHARGES"
+  • "FURY"
+  • "PAIN"
+  • "ESSENCE"
+]]
+
+--[[
+Version History:
+- 1.0.0 (2004-11-23): Initial implementation
+- 1.13.2 (2019-08-26): Added in Classic
+- 11.0.7 (2024-10-15): Current implementation
+]]
+
+--[[
+Details:
+• Fires when a unit's power resource value changes
+• Less frequent than UNIT_POWER_FREQUENT for rapidly changing resources
+• Used for tracking resource changes and UI updates
+• Critical for resource-based ability decision making
+• Fires for both player and non-player units
+]]
+
+--[[
+Best Practices:
+1. Use UNIT_POWER_FREQUENT for high-precision tracking of rapidly changing resources
+2. Combine with UnitPower/UnitPowerMax for complete resource information
+3. Consider throttling updates for performance in high-traffic situations
+4. Cache power values when appropriate
+5. Handle all relevant power types for your addon/WeakAura
+]]
+
+--[[
+Example:
+-- Basic power tracking
+local f = CreateFrame("Frame")
+f:RegisterEvent("UNIT_POWER_UPDATE")
+f:SetScript("OnEvent", function(_, event, unit, powerType)
+    if unit == "player" then
+        local power = UnitPower("player", powerType)
+        local maxPower = UnitPowerMax("player", powerType)
+        print(string.format("%s: %d/%d (%.1f%%)", 
+            powerType, power, maxPower, power/maxPower*100))
+    end
+end)
+
+-- Resource-based ability tracking
+local function HasEnoughResource(unit, powerType, cost)
+    local current = UnitPower(unit, powerType)
+    return current >= cost
+end
+]]
+
+--[[
+Related Functions:
+- UnitPower: Get current power value
+- UnitPowerMax: Get maximum power value
+- UnitPowerType: Get power type information
+- UNIT_POWER_FREQUENT: High-frequency power updates
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/UNIT_POWER_UPDATE
+• In-game FrameXML/GlobalAPI.lua
+]]
+
+--[[
+====================================================================
+UNIT_POWER_POINT_CHARGE
+Event fired when a unit's power point charge state changes
+Introduced: Patch 9.0.1 (Shadowlands)
+Last Changed: Patch 11.0.7 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+unitTarget (string) - UnitId of the unit whose power point charge changed ("player", "target", etc.)
+powerType (string) - Type of power that changed (e.g., "COMBO_POINTS")
+]]
+
+--[[
+Version History:
+- 9.0.1 (2020-10-13): Initial implementation for Shadowlands charged combo points
+- 11.0.7 (2024-10-15): Current implementation
+]]
+
+--[[
+Details:
+• Fires when a unit's power point charge state changes
+• Primarily used for tracking charged combo points
+• Different from regular UNIT_POWER_UPDATE
+• Critical for optimal damage rotation planning
+• Works in conjunction with GetUnitChargedPowerPoints
+]]
+
+--[[
+Best Practices:
+1. Use GetUnitChargedPowerPoints to get current charged points
+2. Combine with GetComboPoints for complete combo point state
+3. Consider talent effects on charging mechanics
+4. Cache charge state when appropriate
+5. Update UI elements efficiently to avoid performance impact
+]]
+
+--[[
+Example:
+local f = CreateFrame("Frame")
+f:RegisterEvent("UNIT_POWER_POINT_CHARGE")
+f:SetScript("OnEvent", function(_, event, unit, powerType)
+    if unit == "player" and powerType == "COMBO_POINTS" then
+        local points = {GetUnitChargedPowerPoints(unit)}
+        if points[1] then
+            print("Charged points:", table.concat(points, ", "))
+        end
+    end
+end)
+]]
+
+--[[
+Related Functions:
+- GetUnitChargedPowerPoints: Get charged point indices
+- GetComboPoints: Get total combo points
+- UnitPower: Get current power resource
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/UNIT_POWER_POINT_CHARGE
+• In-game FrameXML/GlobalAPI.lua
+]]
+
+--[[
+====================================================================
+UNIT_POWER_BAR_HIDE
+Event fired when a unit's alternate power bar becomes hidden
+Introduced: Patch 4.0.1 (Cataclysm)/1.13.2 (Classic)
+Last Changed: Patch 11.0.7 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+unitTarget (string) - UnitId of the unit whose power bar is hidden ("player", "target", etc.)
+]]
+
+--[[
+Version History:
+- 4.0.1 (2010-10-12): Initial implementation
+- 1.13.2 (2019-08-26): Added in Classic
+- 11.0.7 (2024-10-15): Current implementation
+]]
+
+--[[
+Details:
+• Fires when an alternate power bar becomes hidden for a unit
+• Paired with UNIT_POWER_BAR_SHOW event
+• Common for boss encounters with special power mechanics
+• Used for tracking special resource displays
+• Important for encounter-specific UI elements
+]]
+
+--[[
+Best Practices:
+1. Pair with UNIT_POWER_BAR_SHOW for complete state tracking
+2. Use with GetUnitPowerBarInfo for bar details
+3. Consider encounter mechanics when handling
+4. Cache power bar information when appropriate
+5. Handle unit validation for cross-realm scenarios
+]]
+
+--[[
+Example:
+local f = CreateFrame("Frame")
+f:RegisterEvent("UNIT_POWER_BAR_HIDE")
+f:SetScript("OnEvent", function(_, event, unit)
+    if unit == "target" then
+        print("Alternate power bar hidden for", UnitName(unit))
+        -- Clean up any UI elements
+    end
+end)
+]]
+
+--[[
+Related Functions:
+- GetUnitPowerBarInfo: Get power bar details
+- UnitPowerBarID: Get power bar identifier
+- UNIT_POWER_BAR_SHOW event: Track bar showing
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/UNIT_POWER_BAR_HIDE
+• In-game FrameXML/GlobalAPI.lua
+]]
+
+--[[
+====================================================================
+GetUnitPowerBarInfo
+Returns information about a unit's alternate power bar
+Introduced: Patch 4.0.1 (Cataclysm)
+Last Changed: Patch 11.0.7 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+unitToken (string) - UnitId of the unit to query ("player", "target", etc.)
+
+Returns:
+powerBarInfo (table?) - Table containing power bar information or nil if none exists:
+  .barID           (number)  - Unique identifier for this power type
+  .barType         (number)  - Type of power bar display
+  .minPower        (number)  - Minimum power value
+  .maxPower        (number)  - Maximum power value
+  .startInset      (number)  - Left texture inset
+  .endInset        (number)  - Right texture inset
+  .smooth          (boolean) - Whether to animate value changes
+  .hideFromOthers  (boolean) - Whether to hide from other players
+  .showOnRaid      (boolean) - Whether to show in raid frames
+  .costPer         (number)  - Power cost per point
+  .displayAsPower  (boolean) - Display as power instead of percentage
+]]
+
+--[[
+Version History:
+- 4.0.1 (2010-10-12): Initial implementation
+- 11.0.7 (2024-10-15): Current implementation with enhanced return values
+]]
+
+--[[
+Details:
+• Returns detailed information about a unit's alternate power bar
+• Used primarily for encounter-specific power displays
+• Returns nil if unit has no alternate power bar
+• Critical for custom power bar UI implementation
+• Provides layout and behavior information
+]]
+
+--[[
+Best Practices:
+1. Check for nil returns when no power bar exists
+2. Cache results when appropriate for performance
+3. Update cache on UNIT_POWER_BAR_SHOW/HIDE events
+4. Use barID to track specific power bar types
+5. Consider hideFromOthers/showOnRaid for UI visibility
+]]
+
+--[[
+Example:
+local function UpdatePowerBar(unit)
+    local info = GetUnitPowerBarInfo(unit)
+    if info then
+        print(string.format("Power bar %d: %d-%d", 
+            info.barID, info.minPower, info.maxPower))
+        
+        -- Update UI elements
+        if info.smooth then
+            -- Implement smooth value changes
+        end
+        
+        if info.showOnRaid then
+            -- Show in raid frames
+        end
+    end
+end
+
+-- Event handling
+local f = CreateFrame("Frame")
+f:RegisterEvent("UNIT_POWER_BAR_SHOW")
+f:SetScript("OnEvent", function(_, event, unit)
+    UpdatePowerBar(unit)
+end)
+]]
+
+--[[
+Related Functions:
+- UnitPowerBarID: Get power bar identifier
+- GetUnitPowerBarStrings: Get localized text
+- UNIT_POWER_BAR_SHOW/HIDE events: Track visibility changes
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_GetUnitPowerBarInfo
+• In-game FrameXML/GlobalAPI.lua
+]]
+
+--[[
+====================================================================
+GetUnitPowerBarStrings
+Returns localized text strings for a unit's alternate power bar
+Introduced: Patch 8.3.0 (Battle for Azeroth)
+Last Changed: Patch 11.0.7 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+unitToken (string) - UnitId of the unit to query ("player", "target", etc.)
+
+Returns:
+name (string?) - Localized name of the power bar
+tooltip (string?) - Localized tooltip text
+cost (string?) - Localized cost text
+]]
+
+--[[
+Version History:
+- 8.3.0 (2020-01-14): Added. Replaces GetAlternatePowerInfoByID() which is deprecated
+- 11.0.7 (2024-10-15): Current implementation
+]]
+
+--[[
+Details:
+• Returns localized strings for unit's alternate power bar
+• All return values may be nil if unit has no power bar
+• Used for displaying alternate power bar information
+• Important for encounter-specific UI elements
+• Pairs with GetUnitPowerBarInfo for complete display info
+]]
+
+--[[
+Best Practices:
+1. Check for nil returns when no power bar exists
+2. Cache results when appropriate for performance
+3. Update cache on UNIT_POWER_BAR_SHOW/HIDE events
+4. Use with GetUnitPowerBarInfo for complete information
+5. Consider language localization when displaying text
+]]
+
+--[[
+Example:
+local function UpdatePowerBarText(unit)
+    local name, tooltip, cost = GetUnitPowerBarStrings(unit)
+    if name then
+        print(string.format("Power bar: %s", name))
+        if tooltip then
+            print("Tooltip:", tooltip)
+        end
+        if cost then
+            print("Cost:", cost)
+        end
+    end
+end
+
+-- Event handling
+local f = CreateFrame("Frame")
+f:RegisterEvent("UNIT_POWER_BAR_SHOW")
+f:SetScript("OnEvent", function(_, event, unit)
+    UpdatePowerBarText(unit)
+end)
+]]
+
+--[[
+Related Functions:
+- GetUnitPowerBarInfo: Get power bar details
+- UnitPowerBarID: Get power bar identifier
+- GetUnitPowerBarStringsByID: Get strings by bar ID
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_GetUnitPowerBarStrings
+• In-game FrameXML/GlobalAPI.lua
+]]
+
+--[[
+====================================================================
+GetUnitPowerBarStringsByID
+Returns localized text strings for a power bar by ID
+Introduced: Patch 8.3.0 (Battle for Azeroth)
+Last Changed: Patch 11.0.7 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+barID (number) - Power bar identifier from UnitPowerBarID()
+
+Returns:
+name (string?) - Localized name of the power bar
+tooltip (string?) - Localized tooltip text
+cost (string?) - Localized cost text
+]]
+
+--[[
+Version History:
+- 8.3.0 (2020-01-14): Added. Replaces GetAlternatePowerInfoByID()
+- 11.0.7 (2024-10-15): Current implementation
+]]
+
+--[[
+Details:
+• Returns localized strings for a specific power bar ID
+• All return values may be nil if ID is invalid
+• Used for displaying alternate power bar information
+• Important for encounter-specific UI elements
+• More direct than GetUnitPowerBarStrings when ID is known
+]]
+
+--[[
+Best Practices:
+1. Check for nil returns when ID is invalid
+2. Cache results for frequently used power bar IDs
+3. Use UnitPowerBarID to get current bar ID
+4. Consider language localization when displaying text
+5. Handle cases where strings may not be available
+]]
+
+--[[
+Example:
+local function UpdatePowerBarTextByID(unit)
+    local barID = UnitPowerBarID(unit)
+    if barID then
+        local name, tooltip, cost = GetUnitPowerBarStringsByID(barID)
+        if name then
+            print(string.format("Power bar %d: %s", barID, name))
+            if tooltip then
+                print("Tooltip:", tooltip)
+            end
+            if cost then
+                print("Cost:", cost)
+            end
+        end
+    end
+end
+]]
+
+--[[
+Related Functions:
+- GetUnitPowerBarStrings: Get strings by unit
+- UnitPowerBarID: Get power bar identifier
+- GetUnitPowerBarInfo: Get power bar details
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_GetUnitPowerBarStringsByID
+• In-game FrameXML/GlobalAPI.lua
+]]
+
+--[[
+====================================================================
+C_SpellBook.GetSpellBookItemCharges
+Returns the current and maximum charges for a spell in the spellbook
+Introduced: Patch 11.0.0 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+spellBookItemSlotIndex (number) - Spellbook slot index (1-based)
+spellBookItemSpellBank (Enum.SpellBookSpellBank) - Player (0) or Pet (1)
+
+Returns:
+currentCharges (number?) - Current number of charges available, or nil if spell has no charges
+maxCharges (number?) - Maximum number of charges possible, or nil if spell has no charges
+]]
+
+--[[
+Version History:
+- 11.0.0 (2024-07-23): Initial implementation
+- 11.0.5 (2024-09-10): Added proper error handling for invalid slots
+]]
+
+--[[
+Details:
+• Returns charge information for spells that use a charge system
+• Returns nil for both values if spell doesn't use charges
+• Returns nil for invalid slot/bank combinations
+• Useful for tracking abilities with charge-based mechanics
+• Takes into account talents that modify charge counts
+• Considers effects that temporarily grant additional charges
+]]
+
+--[[
+Best Practices:
+1. Verify slot index is valid before calling
+2. Handle nil returns for spells without charges
+3. Use with SPELL_UPDATE_CHARGES event for tracking
+4. Cache results when checking frequently
+5. Consider talent effects on maximum charges
+6. Update tracking when talents or effects change
+]]
+
+--[[
+Example:
+-- Check charges for a spell
+local function CheckSpellCharges(slot, bank)
+    local current, max = C_SpellBook.GetSpellBookItemCharges(slot, bank)
+    if current then
+        print(string.format("Charges: %d/%d", current, max))
+        
+        -- Check if charges are full
+        if current == max then
+            print("All charges available")
+        else
+            print(string.format("Regenerating charges: %d remaining", max - current))
+        end
+    else
+        print("Spell doesn't use charges")
+    end
+end
+
+-- Track charge changes
+local f = CreateFrame("Frame")
+f:RegisterEvent("SPELL_UPDATE_CHARGES")
+f:SetScript("OnEvent", function(_, event)
+    CheckSpellCharges(1, Enum.SpellBookSpellBank.Player)
+end)
+]]
+
+--[[
+Related Functions:
+- C_SpellBook.GetSpellBookItemInfo: Get spell info for slot
+- C_Spell.GetSpellCharges: Get charges for spell by ID
+- SPELL_UPDATE_CHARGES event: Track charge changes
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_C_SpellBook.GetSpellBookItemCharges
+• In-game FrameXML/Blizzard_APIDocumentationGenerated.lua
+]]
+
+--[[
+====================================================================
+C_Spell.GetSpellCharges
+Returns detailed charge information for spells with charge mechanics
+Introduced: Patch 11.0.0 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+spellIdentifier (number|string) - SpellID, name, or hyperlink
+
+Returns:
+chargeInfo (SpellChargeInfo?) - Table containing charge information or nil if spell not found/has no charges:
+  .currentCharges    (number) - Number of charges currently available
+  .maxCharges        (number) - Max number of charges that can be accumulated
+  .cooldownStartTime (number) - Time at which the most recent charge cooldown began (0 if no cooldown)
+  .cooldownDuration  (number) - Cooldown duration in seconds required to generate a charge
+  .chargeModRate     (number) - Rate at which cooldown UI should update (affected by haste)
+]]
+
+--[[
+Version History:
+- 11.0.0 (2024-07-23): Initial implementation
+- 11.0.5 (2024-09-10): Added proper error handling for invalid spells
+]]
+
+--[[
+Details:
+• Returns detailed information about spells that use a charge system
+• Returns nil if spell doesn't use charges or identifier is invalid
+• Cooldown times use GetTime() format for timestamps
+• chargeModRate affects how quickly charges regenerate (modified by haste)
+• Takes into account talents that modify charge counts
+• Considers effects that temporarily grant additional charges
+• More detailed than legacy GetSpellCharges() function
+]]
+
+--[[
+Best Practices:
+1. Check for nil returns with invalid spells or non-charge abilities
+2. Use with SPELL_UPDATE_CHARGES event for tracking changes
+3. Cache results when checking frequently
+4. Consider haste effects on charge regeneration rate
+5. Handle cases where charges may be temporarily modified
+6. Update tracking when talents or effects change
+7. Use GetTime() for cooldown comparisons
+]]
+
+--[[
+Example:
+-- Check spell charges
+local function CheckSpellCharges(spellID)
+    local info = C_Spell.GetSpellCharges(spellID)
+    if info then
+        print(string.format("Charges: %d/%d", info.currentCharges, info.maxCharges))
+        
+        -- Check if regenerating
+        if info.cooldownStartTime > 0 then
+            local timeLeft = (info.cooldownStartTime + info.cooldownDuration) - GetTime()
+            local adjustedTime = timeLeft / info.chargeModRate
+            print(string.format("Next charge in: %.1f seconds", adjustedTime))
+        end
+        
+        -- Check if charges are full
+        if info.currentCharges == info.maxCharges then
+            print("All charges available")
+        end
+    else
+        print("Spell doesn't use charges")
+    end
+end
+
+-- Track charge changes
+local f = CreateFrame("Frame")
+f:RegisterEvent("SPELL_UPDATE_CHARGES")
+f:SetScript("OnEvent", function(_, event)
+    CheckSpellCharges(61304) -- Check charges for a spell
+end)
+]]
+
+--[[
+Related Functions:
+- C_SpellBook.GetSpellBookItemCharges: Get charges from spellbook slot
+- SPELL_UPDATE_CHARGES event: Track charge changes
+- GetSpellCharges: Legacy version (deprecated)
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_C_Spell.GetSpellCharges
+• In-game FrameXML/Blizzard_APIDocumentationGenerated.lua
+]]
+
+--[[
+====================================================================
+C_Spell.GetSpellCastCount
+Returns number of times a spell can be cast based on reagent availability
+Introduced: Patch 11.0.0 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+spellIdentifier (number|string) - SpellID, name, or hyperlink
+
+Returns:
+castCount (number) - Number of times the spell can be cast based on available reagents
+                    Returns 0 if spell is not found or has no reagent requirements
+]]
+
+--[[
+Version History:
+- 11.0.0 (2024-07-23): Initial implementation
+- 11.0.5 (2024-09-10): Added proper error handling for invalid spells
+]]
+
+--[[
+Details:
+• Returns how many times a spell can be cast based on reagent availability
+• Considers all required reagent items in inventory
+• Returns 0 for spells without reagent requirements
+• Returns 0 for invalid spell identifiers
+• Useful for spells that consume items when cast
+• Takes into account reagent stacking limits
+• Important for classic spells requiring reagents (e.g., Soulshards)
+]]
+
+--[[
+Best Practices:
+1. Check for 0 return value to handle spells without reagents
+2. Cache results when checking frequently used spells
+3. Update checks after inventory changes
+4. Consider using with GetSpellInfo for complete spell data
+5. Handle cases where spell may be modified by talents
+6. Update tracking when reagent counts change
+7. Use with UNIT_SPELLCAST_SUCCEEDED for accurate tracking
+]]
+
+--[[
+Example:
+-- Check if spell can be cast
+local function CanCastSpell(spellID)
+    local castCount = C_Spell.GetSpellCastCount(spellID)
+    if castCount > 0 then
+        print(string.format("Can cast spell %d more times", castCount))
+        return true
+    else
+        print("Cannot cast spell (no reagents or invalid spell)")
+        return false
+    end
+end
+
+-- Track reagent-based casting
+local f = CreateFrame("Frame")
+f:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
+f:RegisterEvent("BAG_UPDATE")
+f:SetScript("OnEvent", function(_, event, ...)
+    if event == "UNIT_SPELLCAST_SUCCEEDED" then
+        local unit, _, spellID = ...
+        if unit == "player" then
+            -- Check remaining casts after spell use
+            CanCastSpell(spellID)
+        end
+    elseif event == "BAG_UPDATE" then
+        -- Update cast counts when inventory changes
+        -- Check relevant spells here
+    end
+end)
+]]
+
+--[[
+Related Functions:
+- C_Spell.GetSpellInfo: Get spell details
+- C_SpellBook.GetSpellBookItemCastCount: Get cast count from spellbook
+- BAG_UPDATE event: Track reagent count changes
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_C_Spell.GetSpellCastCount
+• In-game FrameXML/Blizzard_APIDocumentationGenerated.lua
+]]
+
+--[[
+====================================================================
+C_SpellBook.GetSpellBookItemCastCount
+Returns the number of times a spell can be cast based on reagent availability
+Introduced: Patch 11.0.0 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+spellBookItemSlotIndex (number) - Spellbook slot index (1-based)
+spellBookItemSpellBank (Enum.SpellBookSpellBank) - Player (0) or Pet (1)
+
+Returns:
+castCount (number?) - Number of times the spell can be cast based on available reagents, or nil if slot is invalid
+]]
+
+--[[
+Version History:
+- 11.0.0 (2024-07-23): Initial implementation
+- 11.0.5 (2024-09-10): Added proper error handling for invalid slots
+]]
+
+--[[
+Details:
+• Returns how many times a spell in the spellbook can be cast based on reagent availability
+• Returns nil for invalid slot/bank combinations
+• Returns 0 for spells without reagent requirements
+• Useful for spells that consume items when cast (e.g., Soulshards, Runes)
+• Takes into account reagent stacking limits
+• Considers all required reagent items in inventory
+• Important for classic-style spells requiring reagents
+]]
+
+--[[
+Best Practices:
+1. Verify slot index is valid before calling
+2. Handle nil returns for invalid slot/bank combinations
+3. Use with BAG_UPDATE event to track reagent count changes
+4. Cache results when checking frequently used spells
+5. Consider using C_Spell.GetSpellCastCount for direct spell ID access
+6. Update tracking when inventory changes
+7. Handle cases where spell may be modified by talents
+]]
+
+--[[
+Example:
+-- Check if spell can be cast
+local function CanCastSpellFromBook(slot, bank)
+    local castCount = C_SpellBook.GetSpellBookItemCastCount(slot, bank)
+    if castCount then
+        if castCount > 0 then
+            print(string.format("Can cast spell %d more times", castCount))
+            return true
+        else
+            print("Cannot cast spell (no reagents or no reagent requirement)")
+            return false
+        end
+    else
+        print("Invalid spell slot")
+        return false
+    end
+end
+
+-- Track reagent-based casting
+local f = CreateFrame("Frame")
+f:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
+f:RegisterEvent("BAG_UPDATE")
+f:SetScript("OnEvent", function(_, event, ...)
+    if event == "UNIT_SPELLCAST_SUCCEEDED" then
+        local unit = ...
+        if unit == "player" then
+            -- Check remaining casts after spell use
+            CanCastSpellFromBook(1, Enum.SpellBookSpellBank.Player)
+        end
+    elseif event == "BAG_UPDATE" then
+        -- Update cast counts when inventory changes
+        -- Check relevant spell slots here
+    end
+end)
+]]
+
+--[[
+Related Functions:
+- C_Spell.GetSpellCastCount: Get cast count by spell ID
+- C_SpellBook.GetSpellBookItemInfo: Get spell info for slot
+- BAG_UPDATE event: Track reagent count changes
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_C_SpellBook.GetSpellBookItemCastCount
+• In-game FrameXML/Blizzard_APIDocumentationGenerated.lua
+]]
+
+--[[
+====================================================================
+C_SpellBook.IsSpellDisabled
+Returns whether a spell is currently disabled
+Introduced: Patch 8.2.5 (Battle for Azeroth)
+====================================================================
+]]
+
+--[[
+Parameters:
+spellID (number) - The spell ID to check
+
+Returns:
+disabled (boolean) - True if the spell is currently disabled, false otherwise
+]]
+
+--[[
+Version History:
+- 8.2.5 (2019-09-24): Initial implementation
+- 11.0.0 (2024-07-23): Updated for The War Within compatibility
+]]
+
+--[[
+Details:
+• Checks if a spell is currently disabled in the spellbook
+• Returns true for spells that cannot currently be used
+• Common reasons for disabled state:
+  - Wrong specialization
+  - Level requirements not met
+  - Missing prerequisites
+  - Temporarily disabled by game mechanics
+• Used for UI feedback and spell availability checks
+• More reliable than checking spell known status alone
+]]
+
+--[[
+Best Practices:
+1. Use spell IDs rather than names for reliability
+2. Cache results when checking frequently
+3. Update checks when specialization changes
+4. Consider level requirements when checking
+5. Handle disabled state in UI feedback
+6. Combine with IsSpellKnown for complete availability check
+7. Update tracking on SPELLS_CHANGED event
+]]
+
+--[[
+Example:
+local function CanUseSpell(spellID)
+    if not IsSpellKnown(spellID) then
+        return false, "Spell not known"
+    end
+    
+    if C_SpellBook.IsSpellDisabled(spellID) then
+        return false, "Spell is disabled"
+    end
+    
+    return true
+end
+
+-- Track spell availability
+local f = CreateFrame("Frame")
+f:RegisterEvent("SPELLS_CHANGED")
+f:SetScript("OnEvent", function()
+    local spellID = 133 -- Fireball
+    local canUse, reason = CanUseSpell(spellID)
+    if not canUse then
+        print(string.format("Cannot use spell: %s", reason))
+    end
+end)
+]]
+
+--[[
+Related Functions:
+- IsSpellKnown: Check if spell is learned
+- C_Spell.DoesSpellExist: Verify spell exists
+- C_SpellBook.GetSpellInfo: Get spell details
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_C_SpellBook.IsSpellDisabled
+• In-game FrameXML/Blizzard_APIDocumentationGenerated.lua
+]]
+
+--[[
+====================================================================
+C_Spell.IsRangedAutoAttackSpell
+Returns whether a spell is the player's ranged Auto Attack spell
+Introduced: Patch 11.0.0 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+spellIdentifier (number|string) - SpellID, name, or hyperlink
+
+Returns:
+isRangedAutoAttack (boolean) - True if the spell is a ranged auto-attack ability (e.g., Shoot, Auto Shot)
+]]
+
+--[[
+Version History:
+- 11.0.0 (2024-07-23): Initial implementation
+- 11.0.5 (2024-09-10): Added proper error handling for invalid identifiers
+]]
+
+--[[
+Details:
+• Identifies spells that function as ranged auto-attacks
+• Common examples include Hunter's Auto Shot and basic Shoot abilities
+• Returns false for melee auto-attacks and non-attack spells
+• Important for ranged weapon attack automation
+• Used to distinguish between regular spells and auto-attacks
+• Critical for hunter shot weaving and ranged combat mechanics
+]]
+
+--[[
+Best Practices:
+1. Use spell IDs rather than names for reliability
+2. Cache results for frequently checked spells
+3. Consider weapon type requirements
+4. Handle class-specific auto-attack variations
+5. Update checks when equipment changes
+6. Use with UNIT_SPELLCAST_SUCCEEDED for attack tracking
+]]
+
+--[[
+Example:
+-- Check if spell is a ranged auto-attack
+local function IsRangedAutoAttack(spellID)
+    if C_Spell.IsRangedAutoAttackSpell(spellID) then
+        print("Spell is a ranged auto-attack")
+        return true
+    end
+    return false
+end
+
+-- Track auto-attack usage
+local f = CreateFrame("Frame")
+f:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
+f:SetScript("OnEvent", function(_, event, unit, _, spellID)
+    if unit == "player" and IsRangedAutoAttack(spellID) then
+        print("Ranged auto-attack initiated")
+    end
+end)
+]]
+
+--[[
+Related Functions:
+- C_Spell.DoesSpellExist: Verify spell exists
+- C_SpellBook.IsAutoAttackSpellBookItem: Check spellbook slot
+- UNIT_SPELLCAST_SUCCEEDED event: Track attack initiation
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_C_Spell.IsRangedAutoAttackSpell
+• In-game FrameXML/Blizzard_APIDocumentationGenerated.lua
+]]
+
+--[[
+====================================================================
+IsTalentSpell
+Returns whether a spell is learned through talents
+Introduced: Patch 1.0.0 (Vanilla)
+Last Changed: Patch 11.0.7 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+spellID (number) - Numeric spell identifier
+OR
+spellName (string) - Name of the spell to check
+
+Returns:
+isTalent (boolean) - True if the spell is learned through talents, false otherwise
+]]
+
+--[[
+Version History:
+- 1.0.0 (2004-11-23): Initial implementation
+- 11.0.0 (2024-07-23): Updated for modern talent system
+- 11.0.7 (2024-10-15): Current implementation
+]]
+
+--[[
+Details:
+• Checks if a spell is acquired through the talent system
+• Returns false for baseline class abilities
+• Works with both active and inactive talent choices
+• Important for talent-based ability tracking
+• Critical for spec-specific spell availability checks
+• Considers both class and specialization talents
+]]
+
+--[[
+Best Practices:
+1. Prefer spell IDs over names for reliability
+2. Cache results when checking frequently
+3. Update cache when talents change
+4. Use with IsSpellKnown for complete availability check
+5. Consider spec-specific talent variations
+6. Handle cases where talents may be temporarily unavailable
+7. Update tracking on SPELLS_CHANGED and TALENT_GROUP_CHANGED events
+]]
+
+--[[
+Example:
+-- Check if spell is talent-based
+local function IsTalentAbility(spellID)
+    if IsTalentSpell(spellID) then
+        print("Spell is learned through talents")
+        return true
+    end
+    print("Spell is a baseline ability")
+    return false
+end
+
+-- Track talent spell availability
+local f = CreateFrame("Frame")
+f:RegisterEvent("SPELLS_CHANGED")
+f:RegisterEvent("TALENT_GROUP_CHANGED")
+f:SetScript("OnEvent", function(_, event)
+    local spellID = 31935 -- Avenger's Shield
+    IsTalentAbility(spellID)
+end)
+]]
+
+--[[
+Related Functions:
+- IsSpellKnown: Check if spell is learned
+- C_Spell.DoesSpellExist: Verify spell exists
+- C_Spell.GetSpellLevelLearned: Get spell learn level
+- C_Spell.GetOverrideSpell: Get talent-modified version
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_IsTalentSpell
+• In-game FrameXML/GlobalAPI.lua
+]]
+
+--[[
+====================================================================
+C_Spell.IsSpellUsable
+Returns whether a spell is currently castable
+Introduced: Patch 11.0.0 (The War Within)
+Last Changed: Patch 11.0.7 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+spellIdentifier (number|string) - SpellID, name, name(subtext), or link of the spell to check
+
+Returns:
+isUsable (boolean) - True if the spell is usable, false otherwise
+insufficientPower (boolean) - True if spell is specifically unusable due to insufficient power (mana, rage, etc)
+]]
+
+--[[
+Version History:
+- 11.0.0 (2024-07-23): Added as replacement for IsUsableSpell
+- 11.0.7 (2024-10-15): Current implementation
+]]
+
+--[[
+Details:
+• Checks if a spell can be cast at the current moment
+• Multiple factors affect usability:
+  - Spell knowledge (must be learned)
+  - Resource requirements (mana, rage, energy)
+  - Reagent availability
+  - Reactive conditions
+  - Cooldown status
+• Returns two values for precise state determination
+• Second return helps identify resource-specific issues
+• Critical for spell availability checking
+]]
+
+--[[
+Best Practices:
+1. Prefer spell IDs over names for reliability
+2. Check both return values for complete status
+3. Cache results when checking frequently
+4. Update cache on relevant events
+5. Consider cooldowns separately
+6. Handle both return values appropriately
+7. Use with SPELL_UPDATE_USABLE event
+]]
+
+--[[
+Example:
+-- Comprehensive spell usability check
+local function CanUseSpell(spellID)
+    local isUsable, noResource = C_Spell.IsSpellUsable(spellID)
+    if not isUsable then
+        if noResource then
+            print(string.format("Cannot cast %d: Insufficient resources", spellID))
+        else
+            print(string.format("Cannot cast %d: General restriction", spellID))
+        end
+        return false
+    end
+    
+    -- Additional cooldown check if needed
+    local start, duration = C_Spell.GetSpellCooldown(spellID)
+    if start and duration and duration > 0 then
+        print(string.format("Spell on cooldown: %.1f seconds", start + duration - GetTime()))
+        return false
+    end
+    
+    return true
+end
+
+-- Spell state tracking
+local f = CreateFrame("Frame")
+f:RegisterEvent("SPELL_UPDATE_USABLE")
+f:RegisterEvent("UNIT_POWER_UPDATE")
+f:SetScript("OnEvent", function(self, event, unit)
+    if event == "UNIT_POWER_UPDATE" and unit ~= "player" then return end
+    
+    local spellID = 133 -- Fireball
+    CanUseSpell(spellID)
+end)
+]]
+
+--[[
+Related Functions:
+- C_Spell.GetSpellCooldown: Get spell cooldown info
+- IsSpellKnown: Check if spell is learned
+- C_Spell.DoesSpellExist: Verify spell exists
+- C_SpellBook.IsSpellDisabled: Check if spell is disabled
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_C_Spell.IsSpellUsable
+• In-game FrameXML/Blizzard_APIDocumentationGenerated.lua
+]]
+
+--[[
+====================================================================
+C_Spell.PickupSpell
+Places a spell onto the cursor for action bar placement or drag-and-drop operations
+Introduced: Patch 11.0.0 (The War Within)
+Last Changed: Patch 11.0.7 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+spellIdentifier (number|string) - SpellID, name, or link of the spell to pick up
+
+Returns:
+None
+]]
+
+--[[
+Version History:
+- 11.0.0 (2024-07-23): Added as replacement for PickupSpell
+- 11.0.7 (2024-10-15): Current implementation
+]]
+
+--[[
+Details:
+• Places the specified spell onto the cursor
+• Used for drag-and-drop spell management:
+  - Action bar placement
+  - Macro creation
+  - Spell book organization
+• Clears any currently held cursor item
+• Requires spell to be known by the player
+• Works with both learned spells and temporary abilities
+• Commonly used in UI customization
+]]
+
+--[[
+Best Practices:
+1. Prefer spell IDs over names for reliability
+2. Verify spell exists before pickup
+3. Clear cursor before pickup if needed
+4. Handle pickup failure gracefully
+5. Consider spell availability
+6. Use with appropriate UI events
+7. Validate spell knowledge first
+]]
+
+--[[
+Example:
+-- Basic spell pickup
+local function PickupPlayerSpell(spellID)
+    if not C_Spell.DoesSpellExist(spellID) then
+        print("Invalid spell ID")
+        return false
+    end
+    
+    if not IsSpellKnown(spellID) then
+        print("Spell not known")
+        return false
+    end
+    
+    C_Spell.PickupSpell(spellID)
+    return true
+end
+
+-- Spell drag-and-drop handling
+local f = CreateFrame("Frame")
+f:RegisterEvent("SPELLS_CHANGED")
+f:RegisterEvent("SPELL_UPDATE_USABLE")
+f:SetScript("OnEvent", function(self, event)
+    local fireballID = 133
+    if PickupPlayerSpell(fireballID) then
+        print("Fireball ready for placement")
+    end
+end)
+]]
+
+--[[
+Related Functions:
+- C_Spell.DoesSpellExist: Verify spell exists
+- IsSpellKnown: Check if spell is learned
+- ClearCursor: Clear the cursor state
+- C_ActionBar.FindSpellActionButtons: Find spell on action bars
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_C_Spell.PickupSpell
+• In-game FrameXML/Blizzard_APIDocumentationGenerated.lua
+]]
+
+--[[
+====================================================================
+C_Spell.IsSpellPassive
+Returns whether a spell is a passive ability
+Introduced: Patch 11.0.0 (The War Within)
+Last Changed: Patch 11.0.7 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+spellIdentifier (number|string) - SpellID, name, or link of the spell to check
+
+Returns:
+isPassive (boolean) - True if the spell is a passive ability, false otherwise
+]]
+
+--[[
+Version History:
+- 11.0.0 (2024-07-23): Added as replacement for IsPassiveSpell
+- 11.0.7 (2024-10-15): Current implementation
+]]
+
+--[[
+Details:
+• Determines if a spell is a passive ability
+• Passive spells:
+  - Do not require activation
+  - Provide constant benefits
+  - Cannot be placed on action bars
+  - May have conditional triggers
+• Used for UI customization and spell filtering
+• Important for talent and ability organization
+• Helps distinguish between active and passive abilities
+]]
+
+--[[
+Best Practices:
+1. Prefer spell IDs over names for reliability
+2. Cache results when appropriate
+3. Use for proper spell categorization
+4. Consider in UI spell filtering
+5. Update cache on SPELLS_CHANGED
+6. Handle nil returns gracefully
+7. Verify spell exists before checking
+]]
+
+--[[
+Example:
+-- Basic passive spell check
+local function CheckSpellType(spellID)
+    if not C_Spell.DoesSpellExist(spellID) then
+        print(string.format("Invalid spell ID: %d", spellID))
+        return
+    end
+    
+    local isPassive = C_Spell.IsSpellPassive(spellID)
+    print(string.format("Spell %d is %s", spellID, 
+        isPassive and "passive" or "active"))
+    return isPassive
+end
+
+-- Spell type tracking
+local f = CreateFrame("Frame")
+f:RegisterEvent("SPELLS_CHANGED")
+f:RegisterEvent("PLAYER_TALENT_UPDATE")
+f:SetScript("OnEvent", function(self, event)
+    local spellID = 12345 -- Example spell
+    CheckSpellType(spellID)
+end)
+]]
+
+--[[
+Related Functions:
+- C_Spell.DoesSpellExist: Verify spell exists
+- C_Spell.IsSpellUsable: Check if spell can be used
+- C_SpellBook.IsSpellDisabled: Check if spell is disabled
+- GetSpellInfo: Get spell details
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_C_Spell.IsSpellPassive
+• In-game FrameXML/Blizzard_APIDocumentationGenerated.lua
+]]
+
+--[[
+====================================================================
+C_SpellBook.IsSpellBookItemPassive
+Returns whether a spellbook entry is a passive spell
+Introduced: Patch 11.0.0 (The War Within)
+Last Changed: Patch 11.0.7 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+spellBookItemSlotIndex (number) - Spellbook slot index, ranging from 1 through the total number of spells
+spellBookItemSpellBank (Enum.SpellBookSpellBank) - Spellbook type (0 = Player, 1 = Pet)
+
+Returns:
+isPassive (boolean) - True if the spell is passive, false if active or not a spell
+]]
+
+--[[
+Version History:
+- 11.0.0 (2024-07-23): Added as replacement for IsPassiveSpell
+- 11.0.7 (2024-10-15): Current implementation
+]]
+
+--[[
+Details:
+• Checks if a spellbook entry is a passive ability
+• Works with both player and pet spellbooks
+• Returns false for non-spell entries
+• Passive spells in spellbook:
+  - Cannot be dragged to action bars
+  - Provide automatic effects
+  - May have conditional triggers
+  - Show different UI elements
+• Used for spellbook UI customization
+• Important for ability organization
+]]
+
+--[[
+Best Practices:
+1. Validate slot index before calling
+2. Handle both player and pet spellbooks
+3. Cache results when appropriate
+4. Update on SPELLS_CHANGED event
+5. Consider spellbook page context
+6. Handle invalid slots gracefully
+7. Use with GetSpellBookItemInfo
+]]
+
+--[[
+Example:
+-- Check passive status in spellbook
+local function IsSpellbookEntryPassive(slotIndex, spellBank)
+    if not slotIndex or slotIndex < 1 then
+        print("Invalid slot index")
+        return false
+    end
+    
+    local isPassive = C_SpellBook.IsSpellBookItemPassive(slotIndex, spellBank)
+    local spellInfo = C_SpellBook.GetSpellBookItemInfo(slotIndex, spellBank)
+    
+    if spellInfo then
+        print(string.format("Spell in slot %d is %s", 
+            slotIndex, isPassive and "passive" or "active"))
+    end
+    return isPassive
+end
+
+-- Spellbook monitoring
+local f = CreateFrame("Frame")
+f:RegisterEvent("SPELLS_CHANGED")
+f:RegisterEvent("SPELLBOOK_OPEN")
+f:SetScript("OnEvent", function(self, event)
+    -- Check first page of player spellbook
+    for i = 1, SPELLS_PER_PAGE do
+        IsSpellbookEntryPassive(i, Enum.SpellBookSpellBank.Player)
+    end
+end)
+]]
+
+--[[
+Related Functions:
+- C_SpellBook.GetSpellBookItemInfo: Get spell details
+- C_Spell.IsSpellPassive: Check general spell passive state
+- C_SpellBook.IsSpellDisabled: Check if spell is disabled
+- GetSpellBookItemName: Get spell name from spellbook
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_C_SpellBook.IsSpellBookItemPassive
+• In-game FrameXML/Blizzard_APIDocumentationGenerated.lua
+]]
+
+--[[
+====================================================================
+C_Spell.IsSpellInRange
+Returns whether a target is within range of the specified spell
+Introduced: Patch 11.0.0 (The War Within)
+Last Changed: Patch 11.0.7 (The War Within)
+====================================================================
+]]
+
+--[[
+Parameters:
+spellIdentifier (number|string) - SpellID, name, or link of the spell to check
+targetUnit (string?) - Optional. UnitID of the target to check. Defaults to current target
+
+Returns:
+inRange (boolean|nil) - True if in range, false if out of range, nil if check was invalid
+]]
+
+--[[
+Version History:
+- 11.0.0 (2024-07-23): Added as replacement for IsSpellInRange
+- 11.0.7 (2024-10-15): Current implementation
+]]
+
+--[[
+Details:
+• Checks if a target is within casting range of a spell
+• Returns three possible states:
+  - true: Target is in range
+  - false: Target is out of range
+  - nil: Invalid check (wrong spell, no target, etc)
+• Works with all targetable spells
+• Considers spell's maximum range
+• Handles both friendly and hostile spells
+• Critical for UI range indicators
+]]
+
+--[[
+Best Practices:
+1. Prefer spell IDs over names for reliability
+2. Always check for nil returns
+3. Cache results when checking frequently
+4. Update on UNIT_POSITION events
+5. Consider line of sight restrictions
+6. Handle all three return states
+7. Use with appropriate unit validation
+]]
+
+--[[
+Example:
+-- Comprehensive range check
+local function IsTargetInSpellRange(spellID, unit)
+    if not unit then
+        unit = "target"
+    end
+    
+    if not UnitExists(unit) then
+        print("No valid target")
+        return nil
+    end
+    
+    local inRange = C_Spell.IsSpellInRange(spellID, unit)
+    if inRange == nil then
+        print(string.format("Invalid range check for spell %d", spellID))
+        return nil
+    end
+    
+    print(string.format("Target is %sin range for spell %d", 
+        inRange and "" or "not ", spellID))
+    return inRange
+end
+
+-- Range tracking
+local f = CreateFrame("Frame")
+f:RegisterEvent("UNIT_POSITION")
+f:RegisterEvent("PLAYER_TARGET_CHANGED")
+f:SetScript("OnEvent", function(self, event, unit)
+    if event == "UNIT_POSITION" and unit ~= "target" then return end
+    
+    local fireballID = 133
+    IsTargetInSpellRange(fireballID)
+end)
+]]
+
+--[[
+Related Functions:
+- C_Spell.DoesSpellExist: Verify spell exists
+- UnitExists: Check if unit is valid
+- C_Spell.IsSpellUsable: Check if spell can be used
+- CheckInteractDistance: Check unit proximity
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_C_Spell.IsSpellInRange
+• In-game FrameXML/Blizzard_APIDocumentationGenerated.lua
+]]
+
+--[[
+====================================================================
+C_SpellBook.IsSpellBookItemInRange
+==================================
+Introduced: Patch 11.0.0
+Last Updated: Patch 11.0.7
+
+Checks if a spell in the spellbook is within range of the specified target.
+
+Arguments:
+----------
+spellBookItemSlotIndex (number) - The slot index of the spell in the spellbook
+spellBookItemSpellBank (Enum.SpellBookSpellBank) - The spellbook type (0 for Player, 1 for Pet)
+targetUnit (string?, optional) - UnitToken of the target to check range against. If not provided, uses player's current target.
+
+Returns:
+--------
+inRange (boolean?) - true if in range, false if out of range, nil if range check was invalid (e.g., invalid spell, missing target)
+
+Version History:
+---------------
+11.0.0 - Function introduced
+11.0.7 - Updated for The War Within expansion
+
+Behavior:
+---------
+• Performs range check for spells in both player and pet spellbooks
+• Returns nil for invalid checks (missing target, unknown spell)
+• Considers line of sight and other range-affecting factors
+• Works with both offensive and beneficial spells
+• Updates dynamically with target movement
+
+Best Practices:
+--------------
+1. Always validate spell slot index before checking
+2. Handle nil returns appropriately
+3. Consider caching results for frequent checks
+4. Update cached values on SPELL_UPDATE_RANGE event
+5. Use with SpellBook event handlers
+6. Verify spellbook type matches spell location
+
+Example:
+--------
+local function IsSpellInRange(slotIndex, spellBank, target)
+    -- Validate parameters
+    if not slotIndex or not spellBank then return nil end
+    
+    -- Check range
+    local inRange = C_SpellBook.IsSpellBookItemInRange(slotIndex, spellBank, target)
+    
+    -- Handle range status
+    if inRange == nil then
+        print("Invalid range check")
+        return nil
+    elseif not inRange then
+        print("Target out of range")
+        return false
+    end
+    
+    return true
+end
+
+Related Functions:
+-----------------
+• C_Spell.IsSpellInRange - Similar function using spell IDs
+• C_SpellBook.GetSpellBookItemInfo - Get spell information
+• IsSpellInRange - Legacy range checking function
+
+References:
+----------
+• https://warcraft.wiki.gg/wiki/API_C_SpellBook.IsSpellBookItemInRange
+]]
+
+--[[
+====================================================================
+C_LossOfControl.GetActiveLossOfControlData
+Returns information about active loss of control effects on the player
+Introduced: Patch 8.0.1 (Battle for Azeroth)
+====================================================================
+]]
+
+--[[
+Parameters:
+None
+
+Returns:
+lossOfControlData (table[]?) - Array of loss of control data tables, or nil if no LoC effects are active
+  .name               (string)  - Localized name of the LoC effect
+  .icon               (number)  - Texture fileID for the LoC effect
+  .startTime          (number)  - Time the effect started (GetTime() format)
+  .duration           (number)  - Total duration of the effect in seconds
+  .effectType         (number)  - Type of loss of control (see Enum.LossOfControlType)
+  .school             (number)  - Spell school of the effect
+  .sourceUnit         (string?) - Unit that applied the effect (may be nil)
+  .canRefresh         (boolean) - Whether the effect can be refreshed
+  .diminishingReturns (boolean) - Whether the effect is subject to diminishing returns
+  .category           (number)  - Diminishing returns category
+  .spellID            (number)  - Spell ID of the effect
+]]
+
+--[[
+Version History:
+- 8.0.1 (2018-07-17): Initial implementation
+- 11.0.5 (2024-09-10): Added .spellID field
+]]
+
+--[[
+Best Practices:
+1. Check for nil return if no LoC effects are active
+2. Use with LOSS_OF_CONTROL_UPDATE event for real-time tracking
+3. Consider diminishing returns status for PvP
+4. Use effectType to identify the type of LoC
+5. Handle cases where sourceUnit may be nil
+6. Cache results when appropriate
+]]
+
+--[[
+Example:
+local function CheckLossOfControl()
+    local locData = C_LossOfControl.GetActiveLossOfControlData()
+    if locData then
+        for _, effect in ipairs(locData) do
+            print(string.format("Loss of Control: %s (Type: %d, Duration: %.1f)",
+                effect.name, effect.effectType, effect.duration))
+        end
+    end
+end
+
+-- Event handling
+local f = CreateFrame("Frame")
+f:RegisterEvent("LOSS_OF_CONTROL_UPDATE")
+f:SetScript("OnEvent", function()
+    CheckLossOfControl()
+end)
+]]
+
+--[[
+Related Functions:
+- C_Spell.GetSpellLossOfControlCooldown: Get LoC cooldown info
+- LOSS_OF_CONTROL_UPDATE event: Track LoC changes
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_C_LossOfControl.GetActiveLossOfControlData
+• In-game FrameXML/Blizzard_APIDocumentationGenerated.lua
+]]
+
+--[[
+====================================================================
+GetUnitHealthModifier
+Returns a modifier to a unit's current health
+Introduced: Patch 9.0.1 (Shadowlands)
+====================================================================
+]]
+
+--[[
+Parameters:
+unitToken (string) - UnitId of the unit to query ("player", "target", etc.)
+
+Returns:
+healthModifier (number) - A modifier to the unit's health.  1.0 is normal, < 1.0 is reduced, > 1.0 is increased.
+]]
+
+--[[
+Version History:
+- 9.0.1 (2020-10-13): Initial implementation
+]]
+
+--[[
+Details:
+• Returns a value representing a modification to a unit's *effective* health.
+• This is *not* the same as damage or healing. It's a multiplier.
+• Useful for situations where a unit's health is being displayed differently than its actual value.
+• A value of 1.0 indicates no modification.
+• Values less than 1.0 indicate the unit takes increased damage (effectively has less health).
+• Values greater than 1.0 indicate the unit takes reduced damage (effectively has more health).
+]]
+
+--[[
+Best Practices:
+1.  Use in conjunction with `UnitHealth` and `UnitHealthMax` to get the *displayed* health.
+2.  Check for values other than 1.0 to determine if a modifier is active.
+3.  Consider this modifier when calculating effective health percentages.
+]]
+
+--[[
+Example:
+    local health = UnitHealth("target")
+    local maxHealth = UnitHealthMax("target")
+    local modifier = GetUnitHealthModifier("target")
+    local effectiveHealth = health * modifier
+    local effectiveMaxHealth = maxHealth * modifier
+
+    print(string.format("Target Health: %d/%d (Effective: %d/%d, Modifier: %.2f)",
+        health, maxHealth, effectiveHealth, effectiveMaxHealth, modifier))
+]]
+
+--[[
+Related Functions:
+- UnitHealth: Get current health value
+- UnitHealthMax: Get maximum health value
+- UNIT_HEALTH/UNIT_HEALTH_FREQUENT events: Track health changes
+]]
+
+--[[
+References:
+• https://warcraft.wiki.gg/wiki/API_GetUnitHealthModifier
+• In-game FrameXML/GlobalAPI.lua
+]]
+--[[
+====================================================================
+Consolidated Enum Listing
+====================================================================
+]]
+
+--[[
+Enum.SpellType = {
+    SPELL = 0,
+    TALENT = 1,
+    PASSIVE = 2,
+    MASTERY = 3,
+    PVP_TALENT = 4
+}
+
+Enum.SpellBookSpellBank = {
+    Player = 0,  -- Replaces "spell" / BOOKTYPE_SPELL
+    Pet = 1      -- Replaces "pet" / BOOKTYPE_PET
+}
+
+Enum.HotfixType = {
+    DISABLED = 0,
+    ENABLED = 1,
+    REMOVED = 2
+}
+
+Enum.DifficultyType = {
+    NONE = 0,
+    DUNGEON = 8,
+    NORMAL = 14,
+    HEROIC = 15,
+    MYTHIC = 16,
+    LFR = 17
+}
+
+Enum.PowerType = {
+	MANA = 0,
+	RAGE = 1,
+	FOCUS = 2,
+	ENERGY = 3,
+	COMBO_POINTS = 4,
+	RUNES = 5,
+	RUNIC_POWER = 6,
+	SOUL_SHARDS = 7,
+	LUNAR_POWER = 8,
+	HOLY_POWER = 9,
+	ALTERNATE = 10,
+	MAELSTROM = 11,
+	CHI = 12,
+	INSANITY = 13,
+	ARCANE_CHARGES = 14,
+	FURY = 15,
+	PAIN = 16,
+    ESSENCE = 17,
+}
+
+Enum.LossOfControlType = {
+    NONE = 0,
+    STUN = 1,
+    SNARE = 2,
+    ROOT = 3,
+    DISORIENT = 4,
+    SILENCE = 5,
+    FEAR = 6,
+    POLYMORPH = 7,
+    BANISH = 8,
+    SLEEP = 9,
+    HORROR = 10,
+    INCAPACITATE = 11,
+    TURN = 12,
+    CHARM = 13,
+}
+
+--[[
+====================================================================
+Crushing Hits (Removed Mechanic)
+Combat mechanic where attacks could deal 150% damage
+Introduced: Patch 1.0.0 (Vanilla)
+Removed: Battle for Azeroth (8.0)
+====================================================================
+]]
+
+--[[
+Deprecation Notes:
+- Crushing Hits were a combat mechanic in vanilla through Legion
+- They allowed NPCs to deal 150% damage to players on melee attacks
+- Parameter still exists in CombatLogGetCurrentEventInfo but is unused
+- Tank mechanics now primarily revolve around active mitigation
+- Combat log parameter remains for backward compatibility
+]]
+
+--[[
+Migration Guide:
+-- Legacy code (pre-BFA)
+local timestamp, event, _, _, _, _, _, _, _, _, _, _, _, _, amount, _, _, _, _, _, _, _, _, crushing = CombatLogGetCurrentEventInfo()
+if crushing then
+    -- Handle crushing attack
+end
+
+-- Modern equivalent (BFA+)
+-- Crushing mechanic no longer exists, no need to check
+-- Focus on active mitigation mechanics instead
+]]

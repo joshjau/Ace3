@@ -169,6 +169,13 @@ end
 -- Any data on the widget is being erased, and the widget will be hidden.\\
 -- If this widget is a Container-Widget, all of its Child-Widgets will be releases as well.
 -- @param widget The widget to release
+---@class AceGUIWidget
+---@field type string The type of the widget
+---@field frame table The frame object or derivative that represents the widget
+---@field userdata table Table to store user data
+---@field events table Table to store event callbacks
+---@field isQueuedForRelease boolean Whether the widget is queued for release
+---@field ClearFocus fun(self:AceGUIWidget) Method to clear focus from the widget
 function AceGUI:Release(widget)
 	if widget.isQueuedForRelease then return end
 	widget.isQueuedForRelease = true

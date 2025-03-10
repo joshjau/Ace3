@@ -1,0 +1,10 @@
+---
+description: Best practices for World of Warcraft Lua scripting (version 5.1)
+globs: **/*.lua
+alwaysApply: false
+---
+- Use local variables to minimize global namespace pollution
+- Implement error handling with pcall() for robust code
+- Optimize performance by minimizing table allocations and using weak tables
+- Follow WoW API conventions and use appropriate event handlers
+- Keep addons modular and use namespaces to avoid conflicts

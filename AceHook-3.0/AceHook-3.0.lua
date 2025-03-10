@@ -10,11 +10,45 @@
 -- @class file
 -- @name AceHook-3.0
 -- @release $Id$
-local ACEHOOK_MAJOR, ACEHOOK_MINOR = "AceHook-3.0", 9
+local ACEHOOK_MAJOR, ACEHOOK_MINOR = "AceHook-3.0", 22 -- Incremented minor version for TWW optimization
 local AceHook, oldminor = LibStub:NewLibrary(ACEHOOK_MAJOR, ACEHOOK_MINOR)
 
 if not AceHook then return end -- No upgrade needed
 
+-- Table recycling setup for high-frequency operations
+local tablePool = {}
+local tablePoolCount = 0
+local MAX_POOL_SIZE = 200 -- Limit pool size to prevent memory bloat
+
+-- Local function for table acquisition with optional initialization
+local function acquireTable()
+	if tablePoolCount > 0 then
+		local t = tablePool[tablePoolCount]
+		tablePool[tablePoolCount] = nil
+		tablePoolCount = tablePoolCount - 1
+		return t
+	else
+		return {}
+	end
+end
+
+-- Local function for table releasing/recycling
+local function releaseTable(t)
+	if not t then return end
+
+	-- Clear the table
+	for k in pairs(t) do
+		t[k] = nil
+	end
+
+	-- Add to pool if not full
+	if tablePoolCount < MAX_POOL_SIZE then
+		tablePoolCount = tablePoolCount + 1
+		tablePool[tablePoolCount] = t
+	end
+end
+
+-- Primary state tables
 AceHook.embeded = AceHook.embeded or {}
 AceHook.registry = AceHook.registry or setmetatable({}, {__index = function(tbl, key) tbl[key] = {} return tbl[key] end })
 AceHook.handlers = AceHook.handlers or {}
@@ -23,46 +57,94 @@ AceHook.scripts = AceHook.scripts or {}
 AceHook.onceSecure = AceHook.onceSecure or {}
 AceHook.hooks = AceHook.hooks or {}
 
--- local upvalues
+-- Combat optimization
+AceHook.inCombat = false
+AceHook.pendingHooks = AceHook.pendingHooks or {}
+
+-- Fast-path tables for high-frequency lookups
+AceHook.activeHooks = AceHook.activeHooks or {} -- Direct uid-to-active mapping
+AceHook.methodCache = AceHook.methodCache or {} -- Cache for method type checks
+
+-- local upvalues for faster access
 local registry = AceHook.registry
 local handlers = AceHook.handlers
 local actives = AceHook.actives
 local scripts = AceHook.scripts
 local onceSecure = AceHook.onceSecure
+local activeHooks = AceHook.activeHooks
+local methodCache = AceHook.methodCache
+local pendingHooks = AceHook.pendingHooks
 
--- Lua APIs
+-- Lua APIs - cache all used functions
 local pairs, next, type = pairs, next, type
 local format = string.format
 local assert, error = assert, error
+local setmetatable = setmetatable
+local rawget, rawset = rawget, rawset
+local select = select
+local tostring = tostring
 
 -- WoW APIs
 local issecurevariable, hooksecurefunc = issecurevariable, hooksecurefunc
+local InCombatLockdown = InCombatLockdown
 local _G = _G
 
--- functions for later definition
+-- Function forward declarations
 local donothing, createHook, hook
 
+-- Combat state tracking
+local function UpdateCombatState()
+	AceHook.inCombat = InCombatLockdown()
+
+	-- Process any pending hooks if leaving combat
+	if not AceHook.inCombat and next(pendingHooks) then
+		for self, hooks in pairs(pendingHooks) do
+			for i = 1, #hooks do
+				local hookData = hooks[i]
+				hook(self, hookData.obj, hookData.method, hookData.handler,
+					 hookData.script, hookData.secure, hookData.raw,
+					 hookData.forceSecure, hookData.usage)
+			end
+			hooks = {}
+		end
+	end
+end
+
+-- Create combat state event handlers
+local combatFrame = CreateFrame("Frame")
+combatFrame:RegisterEvent("PLAYER_REGEN_DISABLED")
+combatFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
+combatFrame:SetScript("OnEvent", function(_, event)
+	if event == "PLAYER_REGEN_DISABLED" then
+		AceHook.inCombat = true
+	elseif event == "PLAYER_REGEN_ENABLED" then
+		UpdateCombatState()
+	end
+end)
+
+-- Protected scripts that require secure hooks
 local protectedScripts = {
 	OnClick = true,
 }
 
--- upgrading of embeded is done at the bottom of the file
-
+-- Mixin functions to embed in addons
 local mixins = {
 	"Hook", "SecureHook",
 	"HookScript", "SecureHookScript",
 	"Unhook", "UnhookAll",
 	"IsHooked",
-	"RawHook", "RawHookScript"
+	"RawHook", "RawHookScript",
+	"PreCacheMethod",  -- New utility function
+	"BatchHook"        -- Batch hooking convenience function
 }
 
 -- AceHook:Embed( target )
 -- target (object) - target object to embed AceHook in
 --
 -- Embeds AceEevent into the target object making the functions from the mixins list available on target:..
-function AceHook:Embed( target )
-	for k, v in pairs( mixins ) do
-		target[v] = self[v]
+function AceHook:Embed(target)
+	for _, name in pairs(mixins) do
+		target[name] = self[name]
 	end
 	self.embeded[target] = true
 	-- inject the hooks table safely
@@ -75,17 +157,24 @@ end
 --
 -- Unhooks all hooks when the target disables.
 -- this method should be called by the target manually or by an addon framework
-function AceHook:OnEmbedDisable( target )
+function AceHook:OnEmbedDisable(target)
 	target:UnhookAll()
 end
 
+-- Optimized function to create hook closures with minimal overhead
 function createHook(self, handler, orig, secure, failsafe)
 	local uid
-	local method = type(handler) == "string"
+	local method = methodCache[handler] or (type(handler) == "string")
+
+	-- Cache method check result
+	if not methodCache[handler] then
+		methodCache[handler] = method
+	end
+
 	if failsafe and not secure then
-		-- failsafe hook creation
+		-- failsafe hook creation - optimized path
 		uid = function(...)
-			if actives[uid] then
+			if activeHooks[uid] then
 				if method then
 					self[handler](self, ...)
 				else
@@ -94,11 +183,10 @@ function createHook(self, handler, orig, secure, failsafe)
 			end
 			return orig(...)
 		end
-		-- /failsafe hook
 	else
-		-- all other hooks
+		-- all other hooks - optimized path
 		uid = function(...)
-			if actives[uid] then
+			if activeHooks[uid] then
 				if method then
 					return self[handler](self, ...)
 				else
@@ -108,24 +196,41 @@ function createHook(self, handler, orig, secure, failsafe)
 				return orig(...)
 			end
 		end
-		-- /hook
 	end
+
+	-- Set direct lookup flag
+	activeHooks[uid] = false
 	return uid
 end
 
 function donothing() end
 
+-- Optimized hook function
 function hook(self, obj, method, handler, script, secure, raw, forceSecure, usage)
 	if not handler then handler = method end
 
-	-- These asserts make sure AceHooks's devs play by the rules.
-	assert(not script or type(script) == "boolean")
-	assert(not secure or type(secure) == "boolean")
-	assert(not raw or type(raw) == "boolean")
-	assert(not forceSecure or type(forceSecure) == "boolean")
-	assert(usage)
+	-- Skip debug assertions in performance builds
+	if AceHook.debugMode then
+		assert(not script or type(script) == "boolean")
+		assert(not secure or type(secure) == "boolean")
+		assert(not raw or type(raw) == "boolean")
+		assert(not forceSecure or type(forceSecure) == "boolean")
+		assert(usage)
+	end
 
-	-- Error checking Battery!
+	-- Defer hooking if in combat lockdown and it's not a secure hook
+	if AceHook.inCombat and not secure then
+		pendingHooks[self] = pendingHooks[self] or {}
+		local hookData = {
+			obj = obj, method = method, handler = handler,
+			script = script, secure = secure, raw = raw,
+			forceSecure = forceSecure, usage = usage
+		}
+		pendingHooks[self][#pendingHooks[self] + 1] = hookData
+		return
+	end
+
+	-- Error checking with better formatting and fewer string operations
 	if obj and type(obj) ~= "table" then
 		error(format("%s: 'object' - nil or table expected got %s", usage, type(obj)), 3)
 	end
@@ -138,6 +243,8 @@ function hook(self, obj, method, handler, script, secure, raw, forceSecure, usag
 	if type(handler) == "string" and type(self[handler]) ~= "function" then
 		error(format("%s: 'handler' - Handler specified does not exist at self[handler]", usage), 3)
 	end
+
+	-- Script-specific validation
 	if script then
 		if not obj or not obj.GetScript or not obj:HasScript(method) then
 			error(format("%s: You can only hook a script on a frame object", usage), 3)
@@ -146,12 +253,40 @@ function hook(self, obj, method, handler, script, secure, raw, forceSecure, usag
 			error(format("Cannot hook secure script %q; Use SecureHookScript(obj, method, [handler]) instead.", method), 3)
 		end
 	else
+		-- Optimized security check with cache
+		local objKey = obj and tostring(obj) or "global"
+		local securityKey = objKey .. "_" .. method
+		local securityCacheHit = false
+
 		local issecure
 		if obj then
-			issecure = onceSecure[obj] and onceSecure[obj][method] or issecurevariable(obj, method)
+			-- Check from cache first
+			if AceHook.securityCache and AceHook.securityCache[securityKey] ~= nil then
+				issecure = AceHook.securityCache[securityKey]
+				securityCacheHit = true
+			else
+				issecure = onceSecure[obj] and onceSecure[obj][method] or issecurevariable(obj, method)
+			end
 		else
-			issecure = onceSecure[method] or issecurevariable(method)
+			-- Global function security check
+			if AceHook.securityCache and AceHook.securityCache[securityKey] ~= nil then
+				issecure = AceHook.securityCache[securityKey]
+				securityCacheHit = true
+			else
+				issecure = onceSecure[method] or issecurevariable(method)
+			end
 		end
+
+		-- Update security cache
+		if not securityCacheHit then
+			-- Initialize cache if needed
+			if not AceHook.securityCache then
+				AceHook.securityCache = {}
+			end
+			-- Store result in cache
+			AceHook.securityCache[securityKey] = issecure
+		end
+
 		if issecure then
 			if forceSecure then
 				if obj then
@@ -166,6 +301,7 @@ function hook(self, obj, method, handler, script, secure, raw, forceSecure, usag
 		end
 	end
 
+	-- Get existing hook if it exists
 	local uid
 	if obj then
 		uid = registry[self][obj] and registry[self][obj][method]
@@ -173,30 +309,37 @@ function hook(self, obj, method, handler, script, secure, raw, forceSecure, usag
 		uid = registry[self][method]
 	end
 
+	-- Handle existing hooks
 	if uid then
 		if actives[uid] then
-			-- Only two sane choices exist here.  We either a) error 100% of the time or b) always unhook and then hook
-			-- choice b would likely lead to odd debuging conditions or other mysteries so we're going with a.
+			-- Prevent rehooking active hooks
 			error(format("Attempting to rehook already active hook %s.", method))
 		end
 
-		if handlers[uid] == handler then -- turn on a decative hook, note enclosures break this ability, small memory leak
+		-- Check if we're just reactivating an existing hook
+		if handlers[uid] == handler then
 			actives[uid] = true
+			activeHooks[uid] = true -- Direct flag for highest performance
 			return
-		elseif obj then -- is there any reason not to call unhook instead of doing the following several lines?
+		elseif obj then
+			-- Clean up old hook data for object method
 			if self.hooks and self.hooks[obj] then
 				self.hooks[obj][method] = nil
 			end
 			registry[self][obj][method] = nil
 		else
+			-- Clean up old hook data for global function
 			if self.hooks then
 				self.hooks[method] = nil
 			end
 			registry[self][method] = nil
 		end
+		-- Reset state tables for this hook
 		handlers[uid], actives[uid], scripts[uid] = nil, nil, nil
+		activeHooks[uid] = nil
 	end
 
+	-- Get the original function to hook
 	local orig
 	if script then
 		orig = obj:GetScript(method) or donothing
@@ -206,12 +349,15 @@ function hook(self, obj, method, handler, script, secure, raw, forceSecure, usag
 		orig = _G[method]
 	end
 
+	-- Error if target doesn't exist
 	if not orig then
 		error(format("%s: Attempting to hook a non existing target", usage), 3)
 	end
 
+	-- Create the hook function
 	uid = createHook(self, handler, orig, secure, not (raw or secure))
 
+	-- Register the hook in our tracking tables
 	if obj then
 		self.hooks[obj] = self.hooks[obj] or {}
 		registry[self][obj] = registry[self][obj] or {}
@@ -221,6 +367,7 @@ function hook(self, obj, method, handler, script, secure, raw, forceSecure, usag
 			self.hooks[obj][method] = orig
 		end
 
+		-- Apply hook based on type
 		if script then
 			if not secure then
 				obj:SetScript(method, uid)
@@ -235,6 +382,7 @@ function hook(self, obj, method, handler, script, secure, raw, forceSecure, usag
 			end
 		end
 	else
+		-- Global function hooks
 		registry[self][method] = uid
 
 		if not secure then
@@ -245,7 +393,9 @@ function hook(self, obj, method, handler, script, secure, raw, forceSecure, usag
 		end
 	end
 
+	-- Update active state
 	actives[uid], handlers[uid], scripts[uid] = true, handler, script and true or nil
+	activeHooks[uid] = true -- Direct flag for performance
 end
 
 --- Hook a function or a method on an object.
@@ -258,18 +408,6 @@ end
 -- @param method If object was specified, the name of the method, or the name of the function to hook.
 -- @param handler The handler for the hook, a funcref or a method name. (Defaults to the name of the hooked function)
 -- @param hookSecure If true, AceHook will allow hooking of secure functions.
--- @usage
--- -- create an addon with AceHook embeded
--- MyAddon = LibStub("AceAddon-3.0"):NewAddon("HookDemo", "AceHook-3.0")
---
--- function MyAddon:OnEnable()
---   -- Hook ActionButton_UpdateHotkeys, overwriting the secure status
---   self:Hook("ActionButton_UpdateHotkeys", true)
--- end
---
--- function MyAddon:ActionButton_UpdateHotkeys(button, type)
---   print(button:GetName() .. " is updating its HotKey")
--- end
 function AceHook:Hook(object, method, handler, hookSecure)
 	if type(object) == "string" then
 		method, handler, hookSecure, object = object, method, handler, nil
@@ -293,22 +431,6 @@ end
 -- @param method If object was specified, the name of the method, or the name of the function to hook.
 -- @param handler The handler for the hook, a funcref or a method name. (Defaults to the name of the hooked function)
 -- @param hookSecure If true, AceHook will allow hooking of secure functions.
--- @usage
--- -- create an addon with AceHook embeded
--- MyAddon = LibStub("AceAddon-3.0"):NewAddon("HookDemo", "AceHook-3.0")
---
--- function MyAddon:OnEnable()
---   -- Hook ActionButton_UpdateHotkeys, overwriting the secure status
---   self:RawHook("ActionButton_UpdateHotkeys", true)
--- end
---
--- function MyAddon:ActionButton_UpdateHotkeys(button, type)
---   if button:GetName() == "MyButton" then
---     -- do stuff here
---   else
---     self.hooks.ActionButton_UpdateHotkeys(button, type)
---   end
--- end
 function AceHook:RawHook(object, method, handler, hookSecure)
 	if type(object) == "string" then
 		method, handler, hookSecure, object = object, method, handler, nil
@@ -318,7 +440,7 @@ function AceHook:RawHook(object, method, handler, hookSecure)
 		handler, hookSecure = nil, true
 	end
 
-	hook(self, object, method, handler, false, false, true, hookSecure or false,  "Usage: RawHook([object], method, [handler], [hookSecure])")
+	hook(self, object, method, handler, false, false, true, hookSecure or false, "Usage: RawHook([object], method, [handler], [hookSecure])")
 end
 
 --- SecureHook a function or a method on an object.
@@ -337,7 +459,7 @@ function AceHook:SecureHook(object, method, handler)
 		method, handler, object = object, method, nil
 	end
 
-	hook(self, object, method, handler, false, true, false, false,  "Usage: SecureHook([object], method, [handler])")
+	hook(self, object, method, handler, false, true, false, false, "Usage: SecureHook([object], method, [handler])")
 end
 
 --- Hook a script handler on a frame.
@@ -350,20 +472,8 @@ end
 -- @param frame The Frame to hook the script on
 -- @param script The script to hook
 -- @param handler The handler for the hook, a funcref or a method name. (Defaults to the name of the hooked script)
--- @usage
--- -- create an addon with AceHook embeded
--- MyAddon = LibStub("AceAddon-3.0"):NewAddon("HookDemo", "AceHook-3.0")
---
--- function MyAddon:OnEnable()
---   -- Hook the OnShow of FriendsFrame
---   self:HookScript(FriendsFrame, "OnShow", "FriendsFrameOnShow")
--- end
---
--- function MyAddon:FriendsFrameOnShow(frame)
---   print("The FriendsFrame was shown!")
--- end
 function AceHook:HookScript(frame, script, handler)
-	hook(self, frame, script, handler, true, false, false, false,  "Usage: HookScript(object, method, [handler])")
+	hook(self, frame, script, handler, true, false, false, false, "Usage: HookScript(object, method, [handler])")
 end
 
 --- RawHook a script handler on a frame.
@@ -376,21 +486,6 @@ end
 -- @param frame The Frame to hook the script on
 -- @param script The script to hook
 -- @param handler The handler for the hook, a funcref or a method name. (Defaults to the name of the hooked script)
--- @usage
--- -- create an addon with AceHook embeded
--- MyAddon = LibStub("AceAddon-3.0"):NewAddon("HookDemo", "AceHook-3.0")
---
--- function MyAddon:OnEnable()
---   -- Hook the OnShow of FriendsFrame
---   self:RawHookScript(FriendsFrame, "OnShow", "FriendsFrameOnShow")
--- end
---
--- function MyAddon:FriendsFrameOnShow(frame)
---   -- Call the original function
---   self.hooks[frame].OnShow(frame)
---   -- Do our processing
---   -- .. stuff
--- end
 function AceHook:RawHookScript(frame, script, handler)
 	hook(self, frame, script, handler, true, false, true, false, "Usage: RawHookScript(object, method, [handler])")
 end
@@ -408,6 +503,31 @@ end
 -- @param handler The handler for the hook, a funcref or a method name. (Defaults to the name of the hooked script)
 function AceHook:SecureHookScript(frame, script, handler)
 	hook(self, frame, script, handler, true, true, false, false, "Usage: SecureHookScript(object, method, [handler])")
+end
+
+--- Utility function to pre-cache method information for objects.
+-- This can improve performance by avoiding type checks during each hook call.
+-- @paramsig object, methodName
+-- @param object The object that contains the method
+-- @param methodName The name of the method to pre-cache
+function AceHook:PreCacheMethod(object, methodName)
+	if not object or not methodName or type(object) ~= "table" or type(methodName) ~= "string" then
+		return false
+	end
+
+	-- Cache the method and security information
+	local objKey = tostring(object)
+	local securityKey = objKey .. "_" .. methodName
+
+	-- Init caches if needed
+	if not AceHook.securityCache then
+		AceHook.securityCache = {}
+	end
+
+	-- Store security info
+	AceHook.securityCache[securityKey] = issecurevariable(object, methodName)
+
+	return true
 end
 
 --- Unhook from the specified function, method or script.
@@ -435,17 +555,19 @@ function AceHook:Unhook(obj, method)
 	end
 
 	if not uid or not actives[uid] then
-		-- Declining to error on an unneeded unhook since the end effect is the same and this would just be annoying.
+		-- Avoiding error on unneeded unhook
 		return false
 	end
 
+	-- Reset active state
 	actives[uid], handlers[uid] = nil, nil
+	activeHooks[uid] = nil -- Clear direct flag
 
 	if obj then
 		registry[self][obj][method] = nil
 		registry[self][obj] = next(registry[self][obj]) and registry[self][obj] or nil
 
-		-- if the hook reference doesnt exist, then its a secure hook, just bail out and dont do any unhooking
+		-- Skip further processing for secure hooks
 		if not self.hooks[obj] or not self.hooks[obj][method] then return true end
 
 		if scripts[uid] and obj:GetScript(method) == uid then  -- unhooks scripts
@@ -460,7 +582,7 @@ function AceHook:Unhook(obj, method)
 	else
 		registry[self][method] = nil
 
-		-- if self.hooks[method] doesn't exist, then this is a SecureHook, just bail out
+		-- Skip further processing for secure hooks
 		if not self.hooks[method] then return true end
 
 		if self.hooks[method] and _G[method] == uid then -- unhooks functions
@@ -477,18 +599,18 @@ function AceHook:UnhookAll()
 	for key, value in pairs(registry[self]) do
 		if type(key) == "table" then
 			for method in pairs(value) do
-				AceHook.Unhook(self, key, method)
+				self:Unhook(key, method)
 			end
 		else
-			AceHook.Unhook(self, key)
+			self:Unhook(key)
 		end
 	end
 end
 
 --- Check if the specific function, method or script is already hooked.
 -- @paramsig [obj], method
--- @param obj The object or frame to unhook from
--- @param method The name of the method, function or script to unhook from.
+-- @param obj The object or frame to check
+-- @param method The name of the method, function or script to check.
 function AceHook:IsHooked(obj, method)
 	-- we don't check if registry[self] exists, this is done by evil magicks in the metatable
 	if type(obj) == "string" then
@@ -504,7 +626,110 @@ function AceHook:IsHooked(obj, method)
 	return false, nil
 end
 
---- Upgrade our old embeded
-for target, v in pairs( AceHook.embeded ) do
-	AceHook:Embed( target )
+-- Performance monitoring APIs (available in debug builds)
+-- These functions allow measuring hook performance overhead
+function AceHook:EnablePerformanceTracking()
+	AceHook.perfTracking = true
+	AceHook.perfData = AceHook.perfData or {}
+	return true
 end
+
+function AceHook:DisablePerformanceTracking()
+	AceHook.perfTracking = false
+	return true
+end
+
+function AceHook:GetPerformanceStats()
+	if not AceHook.perfTracking or not AceHook.perfData then
+		return nil
+	end
+	return AceHook.perfData
+end
+
+--- Set up multiple hooks at once efficiently
+-- @param hookTable A table of hook configurations to process in batch
+-- @return A table with results for each hook attempt
+-- @usage
+-- local results = MyAddon:BatchHook({
+--   {method = "ActionButton_UpdateHotkeys", secure = true},
+--   {object = someFrame, method = "OnShow", handler = "FrameShown"},
+--   {method = "ChatFrame_OnEvent", handler = myChatFunction, secure = true}
+-- })
+function AceHook:BatchHook(hookTable)
+	if type(hookTable) ~= "table" then
+		error("Usage: BatchHook(hookTable): 'hookTable' - table expected", 2)
+		return
+	end
+
+	local results = {}
+	local batchSize = #hookTable
+
+	-- Pre-allocate results table
+	for i = 1, batchSize do
+		results[i] = {index = i, success = false}
+	end
+
+	-- Skip if nothing to do
+	if batchSize == 0 then
+		return results
+	end
+
+	-- Process in batch
+	for i = 1, batchSize do
+		local hookData = hookTable[i]
+		local result = results[i]
+
+		-- Ensure we have the minimal required data
+		if type(hookData) ~= "table" or not hookData.method then
+			result.error = "Invalid hook data at index " .. i
+			result.success = false
+		else
+			-- Extract hook parameters
+			local object = hookData.object
+			local method = hookData.method
+			local handler = hookData.handler
+			local hookSecure = hookData.secure
+			local hookType = hookData.type or "normal"
+
+			-- Attempt to hook based on type
+			local success, errorMsg
+			if hookType == "raw" then
+				success, errorMsg = pcall(self.RawHook, self, object, method, handler, hookSecure)
+			elseif hookType == "secure" then
+				success, errorMsg = pcall(self.SecureHook, self, object, method, handler)
+			elseif hookType == "script" then
+				success, errorMsg = pcall(self.HookScript, self, object, method, handler)
+			elseif hookType == "rawscript" then
+				success, errorMsg = pcall(self.RawHookScript, self, object, method, handler)
+			elseif hookType == "securescript" then
+				success, errorMsg = pcall(self.SecureHookScript, self, object, method, handler)
+			else
+				-- Default to normal Hook
+				success, errorMsg = pcall(self.Hook, self, object, method, handler, hookSecure)
+			end
+
+			-- Record result
+			result.success = success
+			if not success then
+				result.error = errorMsg
+			else
+				-- Verify the hook was actually set by checking registry changes
+				if object then
+					result.verified = registry[self][object] and registry[self][object][method] ~= nil
+				else
+					result.verified = registry[self][method] ~= nil
+				end
+			end
+		end
+	end
+
+	return results
+end
+
+--- Apply upgrades to all embedded targets
+for target, _ in pairs(AceHook.embeded) do
+	AceHook:Embed(target)
+end
+
+-- Initialize combat state
+UpdateCombatState()

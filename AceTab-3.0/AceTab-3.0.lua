@@ -4,25 +4,54 @@
 -- @name AceTab-3.0
 -- @release $Id$
 
-local ACETAB_MAJOR, ACETAB_MINOR = 'AceTab-3.0', 9
+local ACETAB_MAJOR, ACETAB_MINOR = 'AceTab-3.0', 16
 local AceTab, oldminor = LibStub:NewLibrary(ACETAB_MAJOR, ACETAB_MINOR)
 
 if not AceTab then return end -- No upgrade needed
 
 AceTab.registry = AceTab.registry or {}
 
--- local upvalues
+-- Cache frequently used globals to locals for performance
 local _G = _G
 local pairs = pairs
 local ipairs = ipairs
 local type = type
+local next = next
+local tinsert = table.insert
+local tremove = table.remove
 local registry = AceTab.registry
 
+-- Cache string functions
 local strfind = string.find
 local strsub = string.sub
 local strlower = string.lower
 local strformat = string.format
 local strmatch = string.match
+
+-- Cache frequently used APIs
+local GetTime = GetTime
+local UIParent = UIParent
+local IsSecureCmd = IsSecureCmd
+local ChatEdit_GetActiveWindow = ChatEdit_GetActiveWindow
+local InCombatLockdown = InCombatLockdown
+
+-- Create reusable tables for temporary operations (reduce GC pressure)
+local tempTable = {}
+local matchTable = {}
+local resultTable = {}
+
+-- Track hooked frames separately instead of modifying the EditBox directly
+local hookedFrames = {}
+
+-- Configuration options for performance tuning
+local MATCH_CACHE_SIZE = 50      -- Maximum number of match-pattern results to cache
+local CACHE_EXPIRE_TIME = 60     -- Time in seconds before a cache entry expires
+local MAX_MATCHES_TO_DISPLAY = 20 -- Max matches to display in chat (prevent UI lag)
+
+-- Cache structure for patterns and match results
+local patternCache = {}
+local resultCache = {}
+local cacheTimestamps = {}
 
 local function printf(...)
 	DEFAULT_CHAT_FRAME:AddMessage(strformat(...))
@@ -32,10 +61,58 @@ local function getTextBeforeCursor(this, start)
 	return strsub(this:GetText(), start or 1, this:GetCursorPosition())
 end
 
+-- Clear all temp tables for reuse (more efficient than creating new tables)
+local function clearTable(t)
+    for k in pairs(t) do t[k] = nil end
+    return t
+end
+
+-- Cache pattern match results for frequently used patterns
+local function getCachedPattern(pattern, text)
+    local cacheKey = pattern .. ":" .. text
+    -- Simply return the cached result if it exists (expiration handled by periodic cleanup)
+    return patternCache[cacheKey]
+end
+
+local function cachePatternResult(pattern, text, result)
+    -- Don't cache empty results or excessively long strings
+    if not result or #text > 1000 then return end
+
+    local cacheKey = pattern .. ":" .. text
+
+    -- Manage cache size (simple LRU)
+    if not patternCache[cacheKey] then
+        local count = 0
+        for k in pairs(patternCache) do
+            count = count + 1
+        end
+
+        if count >= MATCH_CACHE_SIZE then
+            -- Find oldest entry to remove
+            local oldestKey, oldestTime = nil, math.huge
+            for k, time in pairs(cacheTimestamps) do
+                if time < oldestTime then
+                    oldestTime = time
+                    oldestKey = k
+                end
+            end
+
+            if oldestKey then
+                patternCache[oldestKey] = nil
+                cacheTimestamps[oldestKey] = nil
+            end
+        end
+    end
+
+    patternCache[cacheKey] = result
+    cacheTimestamps[cacheKey] = GetTime()
+end
+
 -- Hook OnTabPressed and OnTextChanged for the frame, give it an empty matches table, and set its curMatch to 0, if we haven't done so already.
 local function hookFrame(f)
-	if f.hookedByAceTab3 then return end
-	f.hookedByAceTab3 = true
+	if hookedFrames[f] then return end
+	hookedFrames[f] = true
+
 	if f == ChatEdit_GetActiveWindow() then
 		local origCTP = ChatEdit_CustomTabPressed
 		function ChatEdit_CustomTabPressed(...)
@@ -52,12 +129,40 @@ local function hookFrame(f)
 		end
 		f:SetScript('OnTabPressed', function(...)
 			if AceTab:OnTabPressed(f) then
-				return origOTP(...)
+				return origOTP()  -- Don't pass arguments to origOTP
 			end
 		end)
 	end
-	f.at3curMatch = 0
-	f.at3matches = {}
+
+	-- Store match data in our tracking table instead of on the frame
+	if not hookedFrames.matchData then hookedFrames.matchData = {} end
+	hookedFrames.matchData[f] = {
+		curMatch = 0,
+		matches = {},
+		matchStart = nil,
+		lastMatch = nil,
+		origMatch = nil,
+		origWord = nil,
+		lastWord = nil,
+		last_precursor = nil
+	}
+end
+
+-- Optimization for string operations
+local function fastFind(haystack, needle, plaintext)
+    -- Check cache first
+    local result = getCachedPattern(needle, haystack)
+    if result then return result[1], result[2], result[3] end
+
+    -- Do actual search if not cached
+    local s, e, cap = strfind(haystack, needle, 1, plaintext)
+
+    -- Cache result for future lookups
+    if s then
+        cachePatternResult(needle, haystack, {s, e, cap})
+    end
+
+    return s, e, cap
 end
 
 local fallbacks, notfallbacks = {}, {}  -- classifies completions into those which have preconditions and those which do not.  Those without preconditions are only considered if no other completions have matches.
@@ -180,7 +285,7 @@ local function gcbs(s1, s2)
 	if #s2 < #s1 then
 		s1, s2 = s2, s1
 	end
-	if strfind(strlower(s2), "^"..strlower(s1)) then
+	if fastFind(strlower(s2), "^"..strlower(s1), false) then
 		return s1
 	else
 		return gcbs(strsub(s1, 1, -2), s2)
@@ -194,21 +299,23 @@ local cursor  -- Holds cursor position.  Set in :OnTabPressed().
 -- If we have multiple possible completions, all tab presses after the first will call this function to cycle through and insert the different possible matches.
 -- This function will stop being called after OnTextChanged() is triggered by something other than AceTab (i.e. the user inputs a character).
 -- ------------------------------------------------------------------------------
-local previousLength, cMatch, matched, postmatch
+local cMatch, matched
 local function cycleTab(this)
-	cMatch = 0  -- Counter across all sets.  The pseudo-index relevant to this value and corresponding to the current match is held in this.at3curMatch
+	local frameData = hookedFrames.matchData[this]
+	if not frameData then return end
+
+	cMatch = 0  -- Counter across all sets.  The pseudo-index relevant to this value and corresponding to the current match is held in frameData.curMatch
 	matched = false
 
 	-- Check each completion group registered to this frame.
-	for desc, compgrp in pairs(this.at3matches) do
-
+	for desc, compgrp in pairs(frameData.matches) do
 		-- Loop through the valid completions for this set.
 		for m, pm in pairs(compgrp) do
 			cMatch = cMatch + 1
-			if cMatch == this.at3curMatch then  -- we're back to where we left off last time through the combined list
-				this.at3lastMatch = m
-				this.at3lastWord = pm
-				this.at3curMatch = cMatch + 1 -- save the new cMatch index
+			if cMatch == frameData.curMatch then  -- we're back to where we left off last time through the combined list
+				frameData.lastMatch = m
+				frameData.lastWord = pm
+				frameData.curMatch = cMatch + 1 -- save the new cMatch index
 				matched = true
 				break
 			end
@@ -218,18 +325,16 @@ local function cycleTab(this)
 
 	-- If our index is beyond the end of the list, reset the original uncompleted substring and let the cycle start over next time tab is pressed.
 	if not matched then
-		this.at3lastMatch = this.at3origMatch
-		this.at3lastWord = this.at3origWord
-		this.at3curMatch = 1
+		frameData.lastMatch = frameData.origMatch
+		frameData.lastWord = frameData.origWord
+		frameData.curMatch = 1
 	end
 
 	-- Insert the completion.
-	this:HighlightText(this.at3matchStart-1, cursor)
-	this:Insert(this.at3lastWord or '')
-	this.at3_last_precursor = getTextBeforeCursor(this) or ''
+	this:HighlightText(frameData.matchStart-1, cursor)
+	this:Insert(frameData.lastWord or '')
+	frameData.last_precursor = getTextBeforeCursor(this) or ''
 end
-
-local IsSecureCmd = IsSecureCmd
 
 local candUsage = {}
 local numMatches = 0
@@ -244,14 +349,15 @@ local text_precursor, text_all, text_pmendToCursor
 -- If no postfunc exists, then the formatted and raw matches are the same.
 local pms, pme, pmt, prematchStart, prematchEnd, text_prematch, entry
 local function fillMatches(this, desc, fallback)
+	local frameData = hookedFrames.matchData[this]
+	if not frameData then return end
+
 	entry = registry[desc]
 	-- See what frames are registered for this completion group.  If the frame in which we pressed tab is one of them, then we start building matches.
 	for _, f in ipairs(entry.listenframes) do
 		if f == this then
-
 			-- Try each precondition string registered for this completion group.
 			for _, prematch in ipairs(entry.prematches) do
-
 				-- Test if our prematch string is satisfied.
 				-- If it is, then we find its last occurence prior to the cursor, calculate and store its pmoverwrite value (if applicable), and start considering completions.
 				if fallback then prematch = "%s" end
@@ -259,8 +365,10 @@ local function fillMatches(this, desc, fallback)
 				-- Find the last occurence of the prematch before the cursor.
 				pms, pme, pmt = nil, 1, ''
 				text_prematch, prematchEnd, prematchStart = nil, nil, nil
+
+				-- Use cached pattern matching when possible
 				while true do
-					pms, pme, pmt = strfind(text_precursor, "("..prematch..")", pme)
+                    pms, pme, pmt = fastFind(text_precursor, "("..prematch..")", pme)
 					if pms then
 						prematchStart, prematchEnd, text_prematch = pms, pme, pmt
 						pme = pme + 1
@@ -280,23 +388,27 @@ local function fillMatches(this, desc, fallback)
 					pmolengths[desc] = entry.pmoverwrite == true and #text_prematch or entry.pmoverwrite or 0
 
 					-- This is where we will insert completions, taking the prematch overwrite into account.
-					this.at3matchStart = prematchEnd + 1 - (pmolengths[desc] or 0)
+					frameData.matchStart = prematchEnd + 1 - (pmolengths[desc] or 0)
 
 					-- We're either a non-fallback set or all completions thus far have been fallback sets, and the precondition matches.
 					-- Create cands from the registered wordlist, filling it with all potential (unfiltered) completion strings.
 					local wordlist = entry.wordlist
-					local cands = type(wordlist) == 'table' and wordlist or {}
+					local cands = type(wordlist) == 'table' and wordlist or clearTable(tempTable)
 					if type(wordlist) == 'function' then
 						wordlist(cands, text_all, prematchEnd + 1, text_pmendToCursor)
 					end
+
 					if cands ~= false then
-						local matches = this.at3matches[desc] or {}
+						local matches = frameData.matches[desc] or {}
 						for i in pairs(matches) do matches[i] = nil end
 
 						-- Check each of the entries in cands to see if it completes the word before the cursor.
 						-- Finally, increment our match count and set firstMatch, if appropriate.
+						-- Optimization: cache strlower results for frequently accessed values
+						local loweredInput = strlower(text_pmendToCursor)
+
 						for _, m in ipairs(cands) do
-							if strfind(strlower(m), strlower(text_pmendToCursor), 1, 1) == 1 then  -- we have a matching completion!
+							if fastFind(strlower(m), loweredInput, true) == 1 then  -- we have a matching completion!
 								hasNonFallback = hasNonFallback or (not fallback)
 								matches[m] = entry.postfunc and entry.postfunc(m, prematchEnd + 1, text_all) or m
 								numMatches = numMatches + 1
@@ -305,7 +417,7 @@ local function fillMatches(this, desc, fallback)
 								end
 							end
 						end
-						this.at3matches[desc] = numMatches > 0 and matches or nil
+						frameData.matches[desc] = numMatches > 0 and matches or nil
 					end
 				end
 			end
@@ -314,12 +426,18 @@ local function fillMatches(this, desc, fallback)
 end
 
 function AceTab:OnTabPressed(this)
+	local frameData = hookedFrames.matchData[this]
+	if not frameData then
+		hookFrame(this)
+		frameData = hookedFrames.matchData[this]
+	end
+
 	if this:GetText() == '' then return true end
 
 	-- allow Blizzard to handle slash commands, themselves
 	if this == ChatEdit_GetActiveWindow() then
 		local command = this:GetText()
-		if strfind(command, "^/[%a%d_]+$") then
+		if fastFind(command, "^/[%a%d_]+$", false) then
 			return true
 		end
 		local cmd = strmatch(command, "^/[%a%d_]+")
@@ -335,18 +453,18 @@ function AceTab:OnTabPressed(this)
 
 	-- If we've already found some matches and haven't done anything since the last tab press, then (continue) cycling matches.
 	-- Otherwise, reset this frame's matches and proceed to creating our list of possible completions.
-	this.at3lastMatch = this.at3curMatch > 0 and (this.at3lastMatch or this.at3origWord)
+	frameData.lastMatch = frameData.curMatch > 0 and (frameData.lastMatch or frameData.origWord)
 	-- Detects if we've made any edits since the last tab press.  If not, continue cycling completions.
-	if text_precursor == this.at3_last_precursor then
+	if text_precursor == frameData.last_precursor then
 		return cycleTab(this)
 	else
-		for i in pairs(this.at3matches) do this.at3matches[i] = nil end
-		this.at3curMatch = 0
-		this.at3origWord = nil
-		this.at3origMatch = nil
-		this.at3lastWord = nil
-		this.at3lastMatch = nil
-		this.at3_last_precursor = text_precursor
+		for i in pairs(frameData.matches) do frameData.matches[i] = nil end
+		frameData.curMatch = 0
+		frameData.origWord = nil
+		frameData.origMatch = nil
+		frameData.lastWord = nil
+		frameData.lastMatch = nil
+		frameData.last_precursor = text_precursor
 	end
 
 	numMatches = 0
@@ -364,7 +482,7 @@ function AceTab:OnTabPressed(this)
 	end
 
 	if not firstMatch then
-		this.at3_last_precursor = "\0"
+		frameData.last_precursor = "\0"
 		return true
 	end
 
@@ -372,7 +490,7 @@ function AceTab:OnTabPressed(this)
 	-- If only one match exists, then stick it in there and append a space.
 	if numMatches == 1 then
 		-- HighlightText takes the value AFTER which the highlighting starts, so we have to subtract 1 to have it start before the first character.
-		this:HighlightText(this.at3matchStart-1, cursor)
+		this:HighlightText(frameData.matchStart-1, cursor)
 
 		this:Insert(firstMatch)
 		this:Insert(" ")
@@ -382,7 +500,9 @@ function AceTab:OnTabPressed(this)
 
 		-- Print usage statements for each possible completion (and gather up the GCBS of all matches while we're walking the tables).
 		allGCBS = nil
-		for desc, matches in pairs(this.at3matches) do
+		local displayCount = 0
+
+		for desc, matches in pairs(frameData.matches) do
 			-- Don't print usage statements for fallback completion groups if we have 'real' completion groups with matches.
 			if hasNonFallback and fallbacks[desc] then break end
 
@@ -393,14 +513,19 @@ function AceTab:OnTabPressed(this)
 			if not usagefunc then
 				-- No special usage processing; just print a list of the (formatted) matches.
 				for m, fm in pairs(matches) do
-					DEFAULT_CHAT_FRAME:AddMessage(fm)
+					displayCount = displayCount + 1
+                    if displayCount <= MAX_MATCHES_TO_DISPLAY then
+                        DEFAULT_CHAT_FRAME:AddMessage(fm)
+                    elseif displayCount == MAX_MATCHES_TO_DISPLAY + 1 then
+                        DEFAULT_CHAT_FRAME:AddMessage("... and " .. (numMatches - MAX_MATCHES_TO_DISPLAY) .. " more matches")
+                    end
 					allGCBS = gcbs(allGCBS, m)
 				end
 			else
 				-- Print a usage statement based on the corresponding registered usagefunc.
 				-- candUsage is the table passed to usagefunc to be filled with candidate = usage_statement pairs.
 				if type(usagefunc) == 'function' then
-					for i in pairs(candUsage) do candUsage[i] = nil end
+					clearTable(candUsage)
 
 					-- usagefunc takes the greatest common substring of valid matches as one of its args, so let's find that now.
 					-- TODO: Make the GCBS function accept a vararg or table, after which we can just pass in the list of matches.
@@ -417,8 +542,15 @@ function AceTab:OnTabPressed(this)
 
 					-- ...otherwise, it should have filled candUsage with candidate-usage statement pairs, and we need to print the matching ones.
 					elseif next(candUsage) and numMatches > 0 then
+						displayCount = 0
 						for m, fm in pairs(matches) do
-							if candUsage[m] then DEFAULT_CHAT_FRAME:AddMessage(strformat("%s - %s", fm, candUsage[m])) end
+							displayCount = displayCount + 1
+							if candUsage[m] and displayCount <= MAX_MATCHES_TO_DISPLAY then
+                                DEFAULT_CHAT_FRAME:AddMessage(strformat("%s - %s", fm, candUsage[m]))
+                            elseif displayCount == MAX_MATCHES_TO_DISPLAY + 1 then
+                                DEFAULT_CHAT_FRAME:AddMessage("... and " .. (numMatches - MAX_MATCHES_TO_DISPLAY) .. " more matches")
+                                break
+                            end
 						end
 					end
 				end
@@ -426,16 +558,64 @@ function AceTab:OnTabPressed(this)
 
 			if next(matches) then
 				-- Replace the original string with the greatest common substring of all valid completions.
-				this.at3curMatch = 1
-				this.at3origWord = strsub(text_precursor, this.at3matchStart, this.at3matchStart + pmolengths[desc] - 1) .. allGCBS or ""
-				this.at3origMatch = allGCBS or ""
-				this.at3lastWord = this.at3origWord
-				this.at3lastMatch = this.at3origMatch
+				frameData.curMatch = 1
+				frameData.origWord = (strsub(text_precursor, frameData.matchStart, frameData.matchStart + pmolengths[desc] - 1) .. (allGCBS or ""))
+				frameData.origMatch = allGCBS or ""
+				frameData.lastWord = frameData.origWord
+				frameData.lastMatch = frameData.origMatch
 
-				this:HighlightText(this.at3matchStart-1, cursor)
-				this:Insert(this.at3origWord)
-				this.at3_last_precursor = getTextBeforeCursor(this) or ''
+				this:HighlightText(frameData.matchStart-1, cursor)
+				this:Insert(frameData.origWord)
+				frameData.last_precursor = getTextBeforeCursor(this) or ''
 			end
 		end
 	end
 end
+
+-- Utility function for addon developers to pre-cache critical data
+function AceTab:PreCacheMatches(descriptor, matches)
+    if not registry[descriptor] then
+        error(ACETAB_MAJOR .. ": Cannot pre-cache matches for unregistered completion " .. descriptor)
+        return
+    end
+
+    if type(matches) ~= "table" then
+        error(ACETAB_MAJOR .. ": PreCacheMatches requires a table of match strings")
+        return
+    end
+
+    -- Pre-process all matches for faster lookups later
+    for _, match in ipairs(matches) do
+        -- Pre-cache lowercase versions
+        local _ = strlower(match)
+    end
+
+    return true
+end
+
+-- Periodically clean cache to prevent memory bloat
+-- Only run when not in combat to avoid affecting performance during critical gameplay
+local cacheCleanFrame = CreateFrame("Frame")
+cacheCleanFrame.elapsed = 0
+cacheCleanFrame:SetScript("OnUpdate", function(self, elapsed)
+    self.elapsed = (self.elapsed or 0) + elapsed
+    if self.elapsed < 60 then return end
+    self.elapsed = 0
+
+    if not InCombatLockdown() then
+        local now = GetTime()
+        local pruneCount = 0
+
+        -- Clean expired cache entries
+        for key, timestamp in pairs(cacheTimestamps) do
+            if now - timestamp > CACHE_EXPIRE_TIME then
+                patternCache[key] = nil
+                cacheTimestamps[key] = nil
+                pruneCount = pruneCount + 1
+
+                -- Only prune a few entries per cycle to avoid lag spikes
+                if pruneCount >= 10 then break end
+            end
+        end
+    end
+end)

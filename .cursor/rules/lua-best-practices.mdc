@@ -1,0 +1,13 @@
+---
+description: Best practices and guidelines for Lua 5.1
+globs: **/*.lua
+alwaysApply: false
+---
+- Use local variables to limit scope and improve performance
+- Prefer `table.concat` over string concatenation in loops
+- Utilize coroutines for cooperative multitasking
+- Implement error handling with `pcall` and `xpcall`
+- Use metatables for object-oriented programming
+- Optimize loops by caching table lengths
+- Employ `string.format` for string building and formatting
+- Leverage closures for data encapsulation and modular code
