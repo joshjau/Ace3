@@ -4,6 +4,16 @@
 -- @name AceTab-3.0
 -- @release $Id$
 
+---@class EditBox
+---@field at3curMatch number
+---@field at3matches table
+---@field at3lastMatch string
+---@field at3lastWord string
+---@field at3origWord string
+---@field at3origMatch string
+---@field at3matchStart number
+---@field at3_last_precursor string
+
 local ACETAB_MAJOR, ACETAB_MINOR = 'AceTab-3.0', 9
 local AceTab, oldminor = LibStub:NewLibrary(ACETAB_MAJOR, ACETAB_MINOR)
 
@@ -24,6 +34,9 @@ local strlower = string.lower
 local strformat = string.format
 local strmatch = string.match
 
+-- Hook state lookup table
+local hookedFrames = {}
+
 local function printf(...)
 	DEFAULT_CHAT_FRAME:AddMessage(strformat(...))
 end
@@ -34,8 +47,8 @@ end
 
 -- Hook OnTabPressed and OnTextChanged for the frame, give it an empty matches table, and set its curMatch to 0, if we haven't done so already.
 local function hookFrame(f)
-	if f.hookedByAceTab3 then return end
-	f.hookedByAceTab3 = true
+	if hookedFrames[f] then return end
+	hookedFrames[f] = true
 	if f == ChatEdit_GetActiveWindow() then
 		local origCTP = ChatEdit_CustomTabPressed
 		function ChatEdit_CustomTabPressed(...)
@@ -52,7 +65,7 @@ local function hookFrame(f)
 		end
 		f:SetScript('OnTabPressed', function(...)
 			if AceTab:OnTabPressed(f) then
-				return origOTP(...)
+				return origOTP()
 			end
 		end)
 	end
@@ -296,7 +309,8 @@ local function fillMatches(this, desc, fallback)
 						-- Check each of the entries in cands to see if it completes the word before the cursor.
 						-- Finally, increment our match count and set firstMatch, if appropriate.
 						for _, m in ipairs(cands) do
-							if strfind(strlower(m), strlower(text_pmendToCursor), 1, 1) == 1 then  -- we have a matching completion!
+							local pos = strfind(strlower(m), strlower(text_pmendToCursor), 1, 1)
+							if pos == 1 then  -- we have a matching completion!
 								hasNonFallback = hasNonFallback or (not fallback)
 								matches[m] = entry.postfunc and entry.postfunc(m, prematchEnd + 1, text_all) or m
 								numMatches = numMatches + 1
@@ -427,7 +441,7 @@ function AceTab:OnTabPressed(this)
 			if next(matches) then
 				-- Replace the original string with the greatest common substring of all valid completions.
 				this.at3curMatch = 1
-				this.at3origWord = strsub(text_precursor, this.at3matchStart, this.at3matchStart + pmolengths[desc] - 1) .. allGCBS or ""
+				this.at3origWord = (strsub(text_precursor, this.at3matchStart, this.at3matchStart + pmolengths[desc] - 1) .. allGCBS) or ""
 				this.at3origMatch = allGCBS or ""
 				this.at3lastWord = this.at3origWord
 				this.at3lastMatch = this.at3origMatch
