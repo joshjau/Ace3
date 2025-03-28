@@ -14,7 +14,7 @@
 ---@field at3matchStart number
 ---@field at3_last_precursor string
 
-local ACETAB_MAJOR, ACETAB_MINOR = 'AceTab-3.0', 9
+local ACETAB_MAJOR, ACETAB_MINOR = 'AceTab-3.0', 10
 local AceTab, oldminor = LibStub:NewLibrary(ACETAB_MAJOR, ACETAB_MINOR)
 
 if not AceTab then return end -- No upgrade needed
@@ -309,7 +309,7 @@ local function fillMatches(this, desc, fallback)
 						-- Check each of the entries in cands to see if it completes the word before the cursor.
 						-- Finally, increment our match count and set firstMatch, if appropriate.
 						for _, m in ipairs(cands) do
-							local pos = strfind(strlower(m), strlower(text_pmendToCursor), 1, 1)
+							local pos = strfind(strlower(m), strlower(text_pmendToCursor), 1, true)
 							if pos == 1 then  -- we have a matching completion!
 								hasNonFallback = hasNonFallback or (not fallback)
 								matches[m] = entry.postfunc and entry.postfunc(m, prematchEnd + 1, text_all) or m
