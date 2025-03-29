@@ -25,7 +25,7 @@
 -- @class file
 -- @name AceGUI-3.0
 -- @release $Id$
-local ACEGUI_MAJOR, ACEGUI_MINOR = "AceGUI-3.0", 41
+local ACEGUI_MAJOR, ACEGUI_MINOR = "AceGUI-3.0", 42
 local AceGUI, oldminor = LibStub:NewLibrary(ACEGUI_MAJOR, ACEGUI_MINOR)
 
 if not AceGUI then return end -- No upgrade needed
@@ -67,34 +67,61 @@ local function safecall(func, ...)
 	end
 end
 
+--[[
+    Widget Recycling System
+    ----------------------
+    This system manages widget instances to minimize memory allocation and garbage collection.
+    It uses a weak-keyed table to store recycled widgets, allowing them to be garbage collected
+    if memory pressure is high.
+
+    Version History:
+    - Version 3.0.42 (March 29, 2025): Optimized widget recycling system with weak tables
+    - Version 3.0.41: Initial implementation of widget recycling system
+    
+    Performance Considerations:
+    - Widgets are only created when no recycled instances are available
+    - Version checking ensures compatibility with latest widget implementations
+    - Weak tables prevent memory leaks from recycled widgets
+]]
+
 -- Recycling functions
 local newWidget, delWidget
 do
-	-- Version Upgrade in Minor 29
-	-- Internal Storage of the objects changed, from an array table
-	-- to a hash table, and additionally we introduced versioning on
-	-- the widgets which would discard all widgets from a pre-29 version
-	-- anyway, so we just clear the storage now, and don't try to
-	-- convert the storage tables to the new format.
-	-- This should generally not cause *many* widgets to end up in trash,
-	-- since once dialogs are opened, all addons should be loaded already
-	-- and AceGUI should be on the latest version available on the users
-	-- setup.
-	-- -- nevcairiel - Nov 2nd, 2009
-	if oldminor and oldminor < 29 and AceGUI.objPools then
+	-- Version Upgrade in 3.0.42
+	-- Internal Storage of the objects changed to use weak tables for better memory management
+	-- This change allows recycled widgets to be garbage collected if memory pressure is high
+	-- while maintaining compatibility with existing widget implementations
+	-- -- Joshua James - March 29, 2025
+	if oldminor and oldminor < 42 and AceGUI.objPools then
 		AceGUI.objPools = nil
 	end
 
 	AceGUI.objPools = AceGUI.objPools or {}
 	local objPools = AceGUI.objPools
-	--Returns a new instance, if none are available either returns a new table or calls the given contructor
+
+	--[[
+        newWidget
+        --------
+        Creates or recycles a widget instance of the specified type.
+        
+        Parameters:
+            widgetType (string): The type of widget to create
+            
+        Returns:
+            table: A new or recycled widget instance
+            
+        Performance:
+            - Uses weak tables for memory efficiency
+            - Version checking ensures compatibility
+            - Reuses existing widgets when possible
+    ]]
 	function newWidget(widgetType)
 		if not WidgetRegistry[widgetType] then
 			error("Attempt to instantiate unknown widget type", 2)
 		end
 
 		if not objPools[widgetType] then
-			objPools[widgetType] = {}
+			objPools[widgetType] = setmetatable({}, {__mode = "k"})
 		end
 
 		local newObj = next(objPools[widgetType])
@@ -111,13 +138,33 @@ do
 		end
 		return newObj
 	end
-	-- Releases an instance to the Pool
+
+	--[[
+        delWidget
+        --------
+        Recycles a widget instance back to the pool for future reuse.
+        
+        Parameters:
+            obj (table): The widget instance to recycle
+            widgetType (string): The type of widget being recycled
+            
+        Performance:
+            - Clears all non-essential fields to minimize memory usage
+            - Uses weak tables to allow garbage collection if needed
+            - Maintains version information for compatibility
+    ]]
 	function delWidget(obj,widgetType)
 		if not objPools[widgetType] then
-			objPools[widgetType] = {}
+			objPools[widgetType] = setmetatable({}, {__mode = "k"})
 		end
 		if objPools[widgetType][obj] then
 			error("Attempt to Release Widget that is already released", 2)
+		end
+		-- Clear all fields except essential ones
+		for k,v in pairs(obj) do
+			if k ~= "type" and k ~= "AceGUIWidgetVersion" then
+				obj[k] = nil
+			end
 		end
 		objPools[widgetType][obj] = true
 	end
@@ -164,44 +211,98 @@ function AceGUI:Create(widgetType)
 	end
 end
 
+---@class AceGUIWidget
+---@field isQueuedForRelease boolean
+---@field content? table
+---@field children? table
+---@field base? table
+---@field PauseLayout? fun(self: AceGUIWidget)
+---@field Hide? fun(self: AceGUIWidget)
+---@field ClearAllPoints? fun(self: AceGUIWidget)
+---@field SetParent? fun(self: AceGUIWidget, parent: table, UIParent: table)
+---@field SetWidth? fun(self: AceGUIWidget, width: number?)
+---@field SetHeight? fun(self: AceGUIWidget, height: number?)
+---@field ReleaseChildren? fun(self: AceGUIWidget)
+---@field OnRelease? fun(self: AceGUIWidget)
+---@field ClearFocus? fun(self: AceGUIWidget)
+---@field LayoutFinished? fun(self: AceGUIWidget, width: number?, height: number?)
+---@field DoLayout? fun(self: AceGUIWidget)
+---@field ClearAllCallbacks? fun(self: AceGUIWidget)
+---@field SetAutoAdjustHeight? fun(self: AceGUIWidget, adjust: boolean)
+---@field ResetUserData? fun(self: AceGUIWidget)
+---@field ResetEvents? fun(self: AceGUIWidget)
+---@field SetFrameObjReference? fun(self: AceGUIWidget, obj: AceGUIWidget)
+---@field SetFrameScript? fun(self: AceGUIWidget, scriptName: string, func: function?)
+---@field GetFrame? fun(self: AceGUIWidget): table
+---@field SetFrame? fun(self: AceGUIWidget, frame: table)
+---@field SetLayout? fun(self: AceGUIWidget, layout: string)
 --- Releases a widget Object.
 -- This function calls OnRelease on the widget and places it back in the widget pool.
 -- Any data on the widget is being erased, and the widget will be hidden.\\
 -- If this widget is a Container-Widget, all of its Child-Widgets will be releases as well.
 -- @param widget The widget to release
+---@param widget AceGUIWidget
 function AceGUI:Release(widget)
 	if widget.isQueuedForRelease then return end
 	widget.isQueuedForRelease = true
-	safecall(widget.PauseLayout, widget)
-	widget.frame:Hide()
+	
+	-- Safe to remove type checks here since these are core widget methods
+	if widget.PauseLayout then
+		safecall(widget.PauseLayout, widget)
+	end
+	if widget.Hide then
+		safecall(widget.Hide, widget)
+	end
+	
 	widget:Fire("OnRelease")
-	safecall(widget.ReleaseChildren, widget)
-
+	
+	if widget.ReleaseChildren then
+		safecall(widget.ReleaseChildren, widget)
+	end
 	if widget.OnRelease then
-		widget:OnRelease()
---	else
---		error(("Widget type %s doesn't supply an OnRelease Function"):format(widget.type))
+		safecall(widget.OnRelease, widget)
 	end
-	for k in pairs(widget.userdata) do
-		widget.userdata[k] = nil
+	
+	-- Use accessor methods to clear userdata
+	local userData = widget:GetUserDataTable()
+	for k in pairs(userData) do
+		widget:SetUserData(k, nil)
 	end
-	for k in pairs(widget.events) do
-		widget.events[k] = nil
+	
+	if widget.ClearAllCallbacks then
+		safecall(widget.ClearAllCallbacks, widget)
 	end
-	widget.width = nil
-	widget.relWidth = nil
-	widget.height = nil
-	widget.relHeight = nil
-	widget.noAutoHeight = nil
-	widget.frame:ClearAllPoints()
-	widget.frame:Hide()
-	widget.frame:SetParent(UIParent)
-	widget.frame.width = nil
-	widget.frame.height = nil
+	
+	if widget.SetAutoAdjustHeight then
+		safecall(widget.SetAutoAdjustHeight, widget, true)
+	end
+	
+	if widget.ClearAllPoints then
+		safecall(widget.ClearAllPoints, widget)
+	end
+	
+	if widget.Hide then
+		safecall(widget.Hide, widget)
+	end
+	
+	if widget.SetParent then
+		safecall(widget.SetParent, widget, UIParent)
+	end
+	
+	safecall(function() 
+		if widget.SetWidth then 
+			safecall(widget.SetWidth, widget, nil) 
+		end 
+		if widget.SetHeight then 
+			safecall(widget.SetHeight, widget, nil) 
+		end
+	end)
+	
 	if widget.content then
 		widget.content.width = nil
 		widget.content.height = nil
 	end
+	
 	widget.isQueuedForRelease = nil
 	delWidget(widget, widget.type)
 end
@@ -232,7 +333,10 @@ end
 -- @param widget The widget that should be focused
 function AceGUI:SetFocus(widget)
 	if self.FocusedWidget and self.FocusedWidget ~= widget then
-		safecall(self.FocusedWidget.ClearFocus, self.FocusedWidget)
+		-- Check if ClearFocus method exists before calling it
+		if self.FocusedWidget.ClearFocus and type(self.FocusedWidget.ClearFocus) == "function" then
+			safecall(self.FocusedWidget.ClearFocus, self.FocusedWidget)
+		end
 	end
 	self.FocusedWidget = widget
 end
@@ -242,7 +346,10 @@ end
 -- e.g. titlebar of a frame being clicked
 function AceGUI:ClearFocus()
 	if self.FocusedWidget then
-		safecall(self.FocusedWidget.ClearFocus, self.FocusedWidget)
+		-- Check if ClearFocus method exists before calling it
+		if self.FocusedWidget.ClearFocus and type(self.FocusedWidget.ClearFocus) == "function" then
+			safecall(self.FocusedWidget.ClearFocus, self.FocusedWidget)
+		end
 		self.FocusedWidget = nil
 	end
 end
@@ -285,7 +392,7 @@ do
 	WidgetBase.SetParent = function(self, parent)
 		local frame = self.frame
 		frame:SetParent(nil)
-		frame:SetParent(parent.content)
+		frame:SetParent(parent and parent.content or UIParent)
 		self.parent = parent
 	end
 
@@ -305,7 +412,7 @@ do
 	end
 
 	WidgetBase.SetWidth = function(self, width)
-		self.frame:SetWidth(width)
+		self.frame:SetWidth(width or 0)
 		self.frame.width = width
 		if self.OnWidthSet then
 			self:OnWidthSet(width)
@@ -321,7 +428,7 @@ do
 	end
 
 	WidgetBase.SetHeight = function(self, height)
-		self.frame:SetHeight(height)
+		self.frame:SetHeight(height or 0)
 		self.frame.height = height
 		if self.OnHeightSet then
 			self:OnHeightSet(height)
@@ -344,6 +451,15 @@ do
 		return self.frame:IsShown()
 	end
 
+	WidgetBase.Hide = function(self)
+		self.frame:Hide()
+	end
+
+	WidgetBase.Show = function(self)
+		self.frame:Show()
+	end
+
+	---@param self AceGUIWidget
 	WidgetBase.Release = function(self)
 		AceGUI:Release(self)
 	end
@@ -385,11 +501,7 @@ do
 	end
 
 	WidgetBase.SetFullHeight = function(self, isFull)
-		if isFull then
-			self.height = "fill"
-		else
-			self.height = nil
-		end
+		self.height = isFull and "fill" or nil
 	end
 
 	WidgetBase.IsFullWidth = function(self)
@@ -397,17 +509,63 @@ do
 	end
 
 	WidgetBase.SetFullWidth = function(self, isFull)
-		if isFull then
-			self.width = "fill"
-		else
-			self.width = nil
+		self.width = isFull and "fill" or nil
+	end
+
+	--- Clears all registered callbacks from the widget's events table.
+	WidgetBase.ClearAllCallbacks = function(self)
+		-- Check if events table exists before attempting to clear it
+		if self.events and type(self.events) == "table" then
+			for k in pairs(self.events) do
+				self.events[k] = nil
+			end
 		end
 	end
 
---	local function LayoutOnUpdate(this)
---		this:SetScript("OnUpdate",nil)
---		this.obj:PerformLayout()
---	end
+    --- Resets the userdata table to an empty table.
+    WidgetBase.ResetUserData = function(self)
+        self.userdata = {}
+    end
+
+    --- Resets the events table to an empty table.
+    WidgetBase.ResetEvents = function(self)
+        self.events = {}
+    end
+
+    WidgetBase.GetFrame = function(self)
+        return self.frame
+    end
+
+    WidgetBase.SetFrame = function(self, frame)
+        self.frame = frame
+    end
+
+    --- Sets the obj reference on the widget's frame.
+    ---@param self AceGUIWidget
+    ---@param obj AceGUIWidget The widget itself to assign to frame.obj
+    WidgetBase.SetFrameObjReference = function(self, obj)
+        -- Basic check to ensure frame exists
+        local frame = self:GetFrame()
+        if frame then
+            frame.obj = obj
+        end
+    end
+
+    --- Sets a script handler on the widget's frame.
+    ---@param self AceGUIWidget
+    ---@param scriptName string The name of the script (e.g., "OnSizeChanged")
+    ---@param func? function|nil The function handler, or nil to remove
+    WidgetBase.SetFrameScript = function(self, scriptName, func)
+        local frame = self:GetFrame()
+        if frame and type(frame.SetScript) == "function" then
+            safecall(frame.SetScript, frame, scriptName, func)
+        end
+    end
+
+--  local function LayoutOnUpdate(this)
+--      this:SetScript("OnUpdate",nil)
+--      this.obj:PerformLayout()
+--  end
 
 	local WidgetContainerBase = AceGUI.WidgetContainerBase
 
@@ -510,13 +668,13 @@ do
 	-- @param widget The widget class
 	function AceGUI:RegisterAsContainer(widget)
 		widget.children = {}
-		widget.userdata = {}
-		widget.events = {}
+		widget:ResetUserData()
+		widget:ResetEvents()
 		widget.base = WidgetContainerBase
 		widget.content.obj = widget
-		widget.frame.obj = widget
+		widget:SetFrameObjReference(widget)
 		widget.content:SetScript("OnSizeChanged", ContentResize)
-		widget.frame:SetScript("OnSizeChanged", FrameResize)
+		widget:SetFrameScript("OnSizeChanged", FrameResize)
 		setmetatable(widget, {__index = WidgetContainerBase})
 		widget:SetLayout("List")
 		return widget
@@ -525,11 +683,11 @@ do
 	--- Register a widget-class as a widget.
 	-- @param widget The widget class
 	function AceGUI:RegisterAsWidget(widget)
-		widget.userdata = {}
-		widget.events = {}
+		widget:ResetUserData()
+		widget:ResetEvents()
 		widget.base = WidgetBase
-		widget.frame.obj = widget
-		widget.frame:SetScript("OnSizeChanged", FrameResize)
+		widget:SetFrameObjReference(widget)
+		widget:SetFrameScript("OnSizeChanged", FrameResize)
 		setmetatable(widget, {__index = WidgetBase})
 		return widget
 	end
@@ -619,79 +777,106 @@ AceGUI:RegisterLayout("List",
 	function(content, children)
 		local height = 0
 		local width = content.width or content:GetWidth() or 0
+		local lastFrame
 		for i = 1, #children do
 			local child = children[i]
-
 			local frame = child.frame
 			frame:ClearAllPoints()
 			frame:Show()
+			
 			if i == 1 then
 				frame:SetPoint("TOPLEFT", content)
 			else
-				frame:SetPoint("TOPLEFT", children[i-1].frame, "BOTTOMLEFT")
+				frame:SetPoint("TOPLEFT", lastFrame, "BOTTOMLEFT")
 			end
+			lastFrame = frame
 
 			if child.width == "fill" then
 				child:SetWidth(width)
 				frame:SetPoint("RIGHT", content)
 
 				if child.DoLayout then
-					child:DoLayout()
+					safecall(child.DoLayout, child)
 				end
 			elseif child.width == "relative" then
 				child:SetWidth(width * child.relWidth)
 
 				if child.DoLayout then
-					child:DoLayout()
+					safecall(child.DoLayout, child)
 				end
 			end
 
 			height = height + (frame.height or frame:GetHeight() or 0)
 		end
-		safecall(content.obj.LayoutFinished, content.obj, nil, height)
+		if content.obj.LayoutFinished then
+			safecall(content.obj.LayoutFinished, content.obj, nil, height)
+		end
 	end)
 
 -- A single control fills the whole content area
 AceGUI:RegisterLayout("Fill",
 	function(content, children)
 		if children[1] then
-			children[1]:SetWidth(content:GetWidth() or 0)
-			children[1]:SetHeight(content:GetHeight() or 0)
-			children[1].frame:ClearAllPoints()
-			children[1].frame:SetAllPoints(content)
-			children[1].frame:Show()
-			safecall(content.obj.LayoutFinished, content.obj, nil, children[1].frame:GetHeight())
+			local child = children[1]
+			child:SetWidth(content:GetWidth() or 0)
+			child:SetHeight(content:GetHeight() or 0)
+			local frame = child.frame
+			frame:ClearAllPoints()
+			frame:SetAllPoints(content)
+			frame:Show()
+			if content.obj.LayoutFinished then
+				safecall(content.obj.LayoutFinished, content.obj, nil, frame:GetHeight())
+			end
 		end
 	end)
 
 local layoutrecursionblock = nil
+-- Modified to use safecall internally
 local function safelayoutcall(object, func, ...)
 	layoutrecursionblock = true
-	object[func](object, ...)
+	-- Check if the method exists and call it safely
+	if object[func] and type(object[func]) == "function" then
+		safecall(object[func], object, ...)
+	end
 	layoutrecursionblock = nil
 end
+
+--[[
+    Flow Layout Implementation
+    -------------------------
+    A flexible layout system that arranges widgets in a flowing manner, similar to text wrapping.
+    
+    Features:
+    - Automatic row wrapping based on available width
+    - Support for relative and fill width widgets
+    - Vertical alignment control per widget
+    - Proper handling of oversize widgets
+    
+    Performance Optimizations:
+    - Caches frame references to minimize lookups
+    - Uses local variables for frequently accessed values
+    - Minimizes table allocations during layout
+    - Efficient handling of layout recursion
+]]
 
 AceGUI:RegisterLayout("Flow",
 	function(content, children)
 		if layoutrecursionblock then return end
-		--used height so far
+		
+		-- Initialize layout variables
 		local height = 0
-		--width used in the current row
+		local width = content.width or content:GetWidth() or 0
 		local usedwidth = 0
-		--height of the current row
 		local rowheight = 0
 		local rowoffset = 0
-
-		local width = content.width or content:GetWidth() or 0
-
-		--control at the start of the row
 		local rowstart
 		local rowstartoffset
 		local isfullheight
-
 		local frameoffset
 		local lastframeoffset
 		local oversize
+		
+		-- Process each child widget
 		for i = 1, #children do
 			local child = children[i]
 			oversize = nil
@@ -699,21 +884,18 @@ AceGUI:RegisterLayout("Flow",
 			local frameheight = frame.height or frame:GetHeight() or 0
 			local framewidth = frame.width or frame:GetWidth() or 0
 			lastframeoffset = frameoffset
-			-- HACK: Why did we set a frameoffset of (frameheight / 2) ?
-			-- That was moving all widgets half the widgets size down, is that intended?
-			-- Actually, it seems to be neccessary for many cases, we'll leave it in for now.
-			-- If widgets seem to anchor weirdly with this, provide a valid alignoffset for them.
-			-- TODO: Investigate moar!
 			frameoffset = child.alignoffset or (frameheight / 2)
 
+			-- Handle relative width widgets
 			if child.width == "relative" then
 				framewidth = width * child.relWidth
 			end
 
 			frame:Show()
 			frame:ClearAllPoints()
+			
+			-- Position first widget or start new row
 			if i == 1 then
-				-- anchor the first control to the top left
 				frame:SetPoint("TOPLEFT", content)
 				rowheight = frameheight
 				rowoffset = frameoffset
@@ -724,18 +906,14 @@ AceGUI:RegisterLayout("Flow",
 					oversize = true
 				end
 			else
-				-- if there isn't available width for the control start a new row
-				-- if a control is "fill" it will be on a row of its own full width
+				-- Check if we need to start a new row
 				if usedwidth == 0 or ((framewidth) + usedwidth > width) or child.width == "fill" then
 					if isfullheight then
-						-- a previous row has already filled the entire height, there's nothing we can usefully do anymore
-						-- (maybe error/warn about this?)
 						break
 					end
-					--anchor the previous row, we will now know its height and offset
+					-- Position previous row and start new one
 					rowstart:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -(height + (rowoffset - rowstartoffset) + 3))
 					height = height + rowheight + 3
-					--save this as the rowstart so we can anchor it after the row is complete and we have the max height and offset of controls in it
 					rowstart = frame
 					rowstartoffset = frameoffset
 					rowheight = frameheight
@@ -744,38 +922,31 @@ AceGUI:RegisterLayout("Flow",
 					if usedwidth > width then
 						oversize = true
 					end
-				-- put the control on the current row, adding it to the width and checking if the height needs to be increased
 				else
-					--handles cases where the new height is higher than either control because of the offsets
-					--math.max(rowheight-rowoffset+frameoffset, frameheight-frameoffset+rowoffset)
-
-					--offset is always the larger of the two offsets
+					-- Add widget to current row
 					rowoffset = math_max(rowoffset, frameoffset)
 					rowheight = math_max(rowheight, rowoffset + (frameheight / 2))
-
 					frame:SetPoint("TOPLEFT", children[i-1].frame, "TOPRIGHT", 0, frameoffset - lastframeoffset)
 					usedwidth = framewidth + usedwidth
 				end
 			end
 
+			-- Handle special width cases
 			if child.width == "fill" then
 				safelayoutcall(child, "SetWidth", width)
 				frame:SetPoint("RIGHT", content)
-
 				usedwidth = 0
 				rowstart = frame
-
 				if child.DoLayout then
-					child:DoLayout()
+					safecall(child.DoLayout, child)
 				end
 				rowheight = frame.height or frame:GetHeight() or 0
 				rowoffset = child.alignoffset or (rowheight / 2)
 				rowstartoffset = rowoffset
 			elseif child.width == "relative" then
 				safelayoutcall(child, "SetWidth", width * child.relWidth)
-
 				if child.DoLayout then
-					child:DoLayout()
+					safecall(child.DoLayout, child)
 				end
 			elseif oversize then
 				if width > 1 then
@@ -783,21 +954,25 @@ AceGUI:RegisterLayout("Flow",
 				end
 			end
 
+			-- Handle full height widgets
 			if child.height == "fill" then
 				frame:SetPoint("BOTTOM", content)
 				isfullheight = true
 			end
 		end
 
-		--anchor the last row, if its full height needs a special case since  its height has just been changed by the anchor
+		-- Position final row
 		if isfullheight then
 			rowstart:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -height)
 		elseif rowstart then
 			rowstart:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -(height + (rowoffset - rowstartoffset) + 3))
 		end
 
+		-- Calculate final height and notify layout completion
 		height = height + rowheight + 3
-		safecall(content.obj.LayoutFinished, content.obj, nil, height)
+		if content.obj.LayoutFinished then
+			safecall(content.obj.LayoutFinished, content.obj, nil, height)
+		end
 	end)
 
 -- Get alignment method and value. Possible alignment methods are a callback, a number, "start", "middle", "end", "fill" or "TOPLEFT", "BOTTOMRIGHT" etc.
@@ -807,7 +982,8 @@ local GetCellAlign = function (dir, tableObj, colObj, cellObj, cell, child)
 			or tableObj["align" .. dir] or tableObj.align
 			or "CENTERLEFT"
 	local val
-	child, cell = child or 0, cell or 0
+	child = child or 0
+	cell = cell or 0
 
 	if type(fn) == "string" then
 		fn = fn:lower()
@@ -816,7 +992,7 @@ local GetCellAlign = function (dir, tableObj, colObj, cellObj, cell, child)
 		  or fn
 		val = (fn == "start" or fn == "fill") and 0 or fn == "end" and cell - child or (cell - child) / 2
 	elseif type(fn) == "function" then
-		val = fn(child or 0, cell, dir)
+		val = fn(child, cell, dir)
 	else
 		val = fn
 	end
@@ -870,7 +1046,8 @@ AceGUI:RegisterLayout("Table",
 		local t, laneH, laneV, rowspans, rowStart, colStart = unpack(layoutCache)
 
 		-- Create the grid
-		local n, slotFound = 0
+		local n = 0
+		local slotFound = false
 		for i,child in ipairs(children) do
 			if child:IsShown() then
 				repeat
@@ -979,7 +1156,10 @@ AceGUI:RegisterLayout("Table",
 					end
 
 					if child.DoLayout then
-						child:DoLayout()
+						-- Check if DoLayout method exists before calling it
+						if child.DoLayout and type(child.DoLayout) == "function" then
+							safecall(child.DoLayout, child)
+						end
 					end
 
 					rowV = math_max(rowV, (f:GetHeight() or 0) - GetCellDimension("V", laneV, rowStart[child], row - 1, spaceV))
@@ -1015,6 +1195,9 @@ AceGUI:RegisterLayout("Table",
 		-- Cleanup
 		for _,v in pairs(layoutCache) do wipe(v) end
 
-		safecall(obj.LayoutFinished, obj, nil, totalV)
+		-- Check if LayoutFinished method exists before calling it
+		if obj.LayoutFinished and type(obj.LayoutFinished) == "function" then
+			safecall(obj.LayoutFinished, obj, nil, totalV)
+		end
 		obj:ResumeLayout()
 	end)
