@@ -668,14 +668,14 @@ do
 	-- @param widget The widget class
 	function AceGUI:RegisterAsContainer(widget)
 		widget.children = {}
+		widget.base = WidgetContainerBase
+		setmetatable(widget, {__index = WidgetContainerBase})
 		widget:ResetUserData()
 		widget:ResetEvents()
-		widget.base = WidgetContainerBase
 		widget.content.obj = widget
 		widget:SetFrameObjReference(widget)
 		widget.content:SetScript("OnSizeChanged", ContentResize)
 		widget:SetFrameScript("OnSizeChanged", FrameResize)
-		setmetatable(widget, {__index = WidgetContainerBase})
 		widget:SetLayout("List")
 		return widget
 	end
@@ -683,12 +683,12 @@ do
 	--- Register a widget-class as a widget.
 	-- @param widget The widget class
 	function AceGUI:RegisterAsWidget(widget)
+		widget.base = WidgetBase
+		setmetatable(widget, {__index = WidgetBase})
 		widget:ResetUserData()
 		widget:ResetEvents()
-		widget.base = WidgetBase
 		widget:SetFrameObjReference(widget)
 		widget:SetFrameScript("OnSizeChanged", FrameResize)
-		setmetatable(widget, {__index = WidgetBase})
 		return widget
 	end
 end

@@ -50,6 +50,13 @@ local xpcall = xpcall
 local geterrorhandler = geterrorhandler
 local setmetatable = setmetatable
 
+-- Define SendAddonMessageResult enum values
+local SendAddonMessageResult = {
+	Success = 0,
+	GeneralError = 1,
+	AddonMessageThrottle = 2
+}
+
 ---@class ChatThrottleLib
 ---@field version number The current version of the library
 ---@field securelyHooked boolean Whether SendChatMessage is securely hooked
