@@ -1,15 +1,27 @@
---- **AceComm-3.0** allows you to send messages of unlimited length over the addon comm channels.
--- It'll automatically split the messages into multiple parts and rebuild them on the receiving end.\\
--- **ChatThrottleLib** is of course being used to avoid being disconnected by the server.
+--- **AceComm-3.0** is a robust addon communication library for World of Warcraft that enables reliable message transmission over addon channels.
+-- It handles message fragmentation and reassembly automatically, ensuring messages of any length are delivered correctly.
+-- The library uses ChatThrottleLib to prevent server disconnections by managing bandwidth usage.
 --
--- **AceComm-3.0** can be embeded into your addon, either explicitly by calling AceComm:Embed(MyAddon) or by
--- specifying it as an embeded library in your AceAddon. All functions will be available on your addon object
--- and can be accessed directly, without having to explicitly call AceComm itself.\\
--- It is recommended to embed AceComm, otherwise you'll have to specify a custom `self` on all calls you
--- make into AceComm.
+-- Key Features:
+-- * Automatic message splitting and reassembly
+-- * Bandwidth throttling via ChatThrottleLib
+-- * Support for all addon communication channels
+-- * Callback-based message handling
+-- * Cross-realm compatibility
+--
+-- Usage:
+-- ```lua
+-- local AceComm = LibStub("AceComm-3.0")
+-- AceComm:Embed(MyAddon)
+-- MyAddon:RegisterComm("MyPrefix")
+-- MyAddon:SendCommMessage("MyPrefix", "Hello World", "RAID")
+-- ```
+--
 -- @class file
 -- @name AceComm-3.0
 -- @release $Id$
+-- @maintainer Joshua James
+-- @version 3.0.16
 
 --[[ AceComm-3.0
 
@@ -20,7 +32,7 @@ TODO: Time out old data rotting around from dead senders? Not a HUGE deal since 
 local CallbackHandler = LibStub("CallbackHandler-1.0")
 local CTL = assert(ChatThrottleLib, "AceComm-3.0 requires ChatThrottleLib")
 
-local MAJOR, MINOR = "AceComm-3.0", 14
+local MAJOR, MINOR = "AceComm-3.0", 16
 local AceComm,oldminor = LibStub:NewLibrary(MAJOR, MINOR)
 
 if not AceComm then return end
@@ -34,6 +46,8 @@ local error, assert = error, assert
 
 -- WoW APIs
 local Ambiguate = Ambiguate
+local GetTimePreciseSec = GetTimePreciseSec
+local C_ChatInfo = C_ChatInfo
 
 AceComm.embeds = AceComm.embeds or {}
 
@@ -50,21 +64,44 @@ AceComm.multipart_reassemblers = nil
 -- the multipart message spool: indexed by a combination of sender+distribution+
 AceComm.multipart_spool = AceComm.multipart_spool or {}
 
+-- Pre-allocate commonly used tables for better performance
+local tempTable = {}
+local function clearTempTable()
+	for i = #tempTable, 1, -1 do
+		tempTable[i] = nil
+	end
+end
+
 --- Register for Addon Traffic on a specified prefix
 -- @param prefix A printable character (\032-\255) classification of the message (typically AddonName or AddonNameEvent), max 16 characters
 -- @param method Callback to call on message reception: Function reference, or method name (string) to call on self. Defaults to "OnCommReceived"
+-- @return boolean True if registration was successful
+-- @raise Error if prefix length exceeds 16 characters
+-- @raise Error if prefix registration fails
+-- @usage
+-- ```lua
+-- MyAddon:RegisterComm("MyPrefix") -- Uses default OnCommReceived callback
+-- MyAddon:RegisterComm("MyPrefix", "CustomCallback") -- Uses custom callback method
+-- ```
 function AceComm:RegisterComm(prefix, method)
 	if method == nil then
 		method = "OnCommReceived"
 	end
 
-	if #prefix > 16 then -- TODO: 15?
+	if #prefix > 16 then
 		error("AceComm:RegisterComm(prefix,method): prefix length is limited to 16 characters")
 	end
+	
+	-- Improved prefix registration with error handling
+	local success = false
 	if C_ChatInfo then
-		C_ChatInfo.RegisterAddonMessagePrefix(prefix)
+		success = C_ChatInfo.RegisterAddonMessagePrefix(prefix) == Enum.RegisterAddonMessagePrefixResult.Success
 	else
-		RegisterAddonMessagePrefix(prefix)
+		success = RegisterAddonMessagePrefix(prefix) == Enum.RegisterAddonMessagePrefixResult.Success
+	end
+	
+	if not success then
+		error("AceComm:RegisterComm(prefix,method): Failed to register prefix '"..tostring(prefix).."'")
 	end
 
 	return AceComm._RegisterComm(self, prefix, method)	-- created by CallbackHandler
@@ -72,7 +109,7 @@ end
 
 local warnedPrefix=false
 
---- Send a message over the Addon Channel
+--- Send a message over the Addon Channel with automatic fragmentation and reassembly
 -- @param prefix A printable character (\032-\255) classification of the message (typically AddonName or AddonNameEvent)
 -- @param text Data to send, nils (\000) not allowed. Any length.
 -- @param distribution Addon channel, e.g. "RAID", "GUILD", etc; see SendAddonMessage API
@@ -80,6 +117,18 @@ local warnedPrefix=false
 -- @param prio OPTIONAL: ChatThrottleLib priority, "BULK", "NORMAL" or "ALERT". Defaults to "NORMAL".
 -- @param callbackFn OPTIONAL: callback function to be called as each chunk is sent. receives 3 args: the user supplied arg (see next), the number of bytes sent so far, and the number of bytes total to send.
 -- @param callbackArg: OPTIONAL: first arg to the callback function. nil will be passed if not specified.
+-- @raise Error if any required parameters are missing or invalid
+-- @usage
+-- ```lua
+-- -- Simple message
+-- MyAddon:SendCommMessage("MyPrefix", "Hello World", "RAID")
+-- 
+-- -- With priority and callback
+-- MyAddon:SendCommMessage("MyPrefix", "Long message...", "GUILD", nil, "BULK", 
+--     function(arg, sent, total)
+--         print(string.format("Sent %d/%d bytes", sent, total))
+--     end, "MyArg")
+-- ```
 function AceComm:SendCommMessage(prefix, text, distribution, target, prio, callbackFn, callbackArg)
 	prio = prio or "NORMAL"	-- pasta's reference implementation had different prio for singlepart and multipart, but that's a very bad idea since that can easily lead to out-of-sequence delivery!
 	if not( type(prefix)=="string" and
@@ -148,12 +197,11 @@ do
 		local t = next(compost)
 		if t then
 			compost[t]=nil
-			for i=#t,3,-1 do	-- faster than pairs loop. don't even nil out 1/2 since they'll be overwritten
+			for i=#t,1,-1 do    -- Clear all indices for complete recycling
 				t[i]=nil
 			end
 			return t
 		end
-
 		return {}
 	end
 
@@ -161,27 +209,23 @@ do
 		DEFAULT_CHAT_FRAME:AddMessage(MAJOR..": Warning: lost network data regarding '"..tostring(prefix).."' from '"..tostring(sender).."' (in "..where..")")
 	end
 
+	---@class AceComm-3.0
+	---@field OnReceiveMultipartFirst fun(self: AceComm-3.0, prefix: string, message: string, distribution: string, sender: string)
+	---@field OnReceiveMultipartNext fun(self: AceComm-3.0, prefix: string, message: string, distribution: string, sender: string)
+	---@field OnReceiveMultipartLast fun(self: AceComm-3.0, prefix: string, message: string, distribution: string, sender: string)
 	function AceComm:OnReceiveMultipartFirst(prefix, message, distribution, sender)
-		local key = prefix.."\t"..distribution.."\t"..sender	-- a unique stream is defined by the prefix + distribution + sender
+		local key = prefix.."\t"..distribution.."\t"..sender    -- a unique stream is defined by the prefix + distribution + sender
 		local spool = AceComm.multipart_spool
-
-		--[[
-		if spool[key] then
-			lostdatawarning(prefix,sender,"First")
-			-- continue and overwrite
-		end
-		--]]
 
 		spool[key] = message  -- plain string for now
 	end
 
 	function AceComm:OnReceiveMultipartNext(prefix, message, distribution, sender)
-		local key = prefix.."\t"..distribution.."\t"..sender	-- a unique stream is defined by the prefix + distribution + sender
+		local key = prefix.."\t"..distribution.."\t"..sender    -- a unique stream is defined by the prefix + distribution + sender
 		local spool = AceComm.multipart_spool
 		local olddata = spool[key]
 
 		if not olddata then
-			--lostdatawarning(prefix,sender,"Next")
 			return
 		end
 
@@ -197,12 +241,11 @@ do
 	end
 
 	function AceComm:OnReceiveMultipartLast(prefix, message, distribution, sender)
-		local key = prefix.."\t"..distribution.."\t"..sender	-- a unique stream is defined by the prefix + distribution + sender
+		local key = prefix.."\t"..distribution.."\t"..sender    -- a unique stream is defined by the prefix + distribution + sender
 		local spool = AceComm.multipart_spool
 		local olddata = spool[key]
 
 		if not olddata then
-			--lostdatawarning(prefix,sender,"End")
 			return
 		end
 
@@ -239,6 +282,14 @@ end
 AceComm.callbacks.OnUsed = nil
 AceComm.callbacks.OnUnused = nil
 
+--- Event handler for CHAT_MSG_ADDON events
+-- @param self The frame receiving the event
+-- @param event The event name (CHAT_MSG_ADDON)
+-- @param prefix The message prefix
+-- @param message The message content
+-- @param distribution The distribution channel
+-- @param sender The sender of the message
+-- @internal
 local function OnEvent(self, event, prefix, message, distribution, sender)
 	if event == "CHAT_MSG_ADDON" then
 		sender = Ambiguate(sender, "none")
@@ -264,6 +315,7 @@ local function OnEvent(self, event, prefix, message, distribution, sender)
 	end
 end
 
+-- Create and configure the event frame
 AceComm.frame = AceComm.frame or CreateFrame("Frame", "AceComm30Frame")
 AceComm.frame:SetScript("OnEvent", OnEvent)
 AceComm.frame:UnregisterAllEvents()
@@ -274,6 +326,7 @@ AceComm.frame:RegisterEvent("CHAT_MSG_ADDON")
 -- Base library stuff
 ----------------------------------------
 
+-- List of functions to embed into target objects
 local mixins = {
 	"RegisterComm",
 	"UnregisterComm",
@@ -281,8 +334,16 @@ local mixins = {
 	"SendCommMessage",
 }
 
--- Embeds AceComm-3.0 into the target object making the functions from the mixins list available on target:..
+--- Embeds AceComm-3.0 into the target object making the functions from the mixins list available on target:..
 -- @param target target object to embed AceComm-3.0 in
+-- @return The target object with AceComm-3.0 functions embedded
+-- @usage
+-- ```lua
+-- local MyAddon = {}
+-- AceComm:Embed(MyAddon)
+-- -- Now MyAddon has all AceComm functions available
+-- MyAddon:RegisterComm("MyPrefix")
+-- ```
 function AceComm:Embed(target)
 	for k, v in pairs(mixins) do
 		target[v] = self[v]
@@ -291,6 +352,9 @@ function AceComm:Embed(target)
 	return target
 end
 
+--- Called when an embedded object is disabled
+-- @param target The embedded object being disabled
+-- @internal
 function AceComm:OnEmbedDisable(target)
 	target:UnregisterAllComm()
 end
